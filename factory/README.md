@@ -1,215 +1,242 @@
-# SocketFi Factory Contract
+# Factory Contract
 
-The SocketFi Factory contract is responsible for managing wallet deployment and factory-level configuration for the SocketFi smart wallet system.
+The **Factory Contract** is the core entry point for wallet creation and upgrade governance within the SocketFi ecosystem.
 
-It acts as the controlled entry point for creating new wallet contracts and maintaining the approved wallet implementation hash used for deployment.
+It is responsible for:
 
-## Responsibilities
+- Creating new wallet instances
+- Managing core system contract dependencies
+- Handling upgrade governance (proposals, voting, execution)
 
-The factory contract is responsible for:
+---
 
-- initializing the factory configuration
-- storing the factory admin
-- storing the identity registry contract address
-- storing the latest approved wallet WASM hash
-- deploying new wallet contracts
-- updating the approved wallet WASM hash
-- updating admin and registry addresses
-- upgrading the factory contract itself
+## ✨ Features
 
-## Overview
+### 🔐 Wallet Creation
 
-On deployment, the factory is initialized with:
+- Permissionless wallet deployment
+- Supports passkey-based identity and BLS key attachments
+- Emits wallet creation events
 
-- an `admin` address
-- a `registry` address
-- an initial wallet `wasm` hash
+### ⚙️ System Configuration
 
-After initialization, the factory can deploy new wallet contracts using the currently approved wallet WASM hash.
+- Stores and manages:
+  - Admin address
+  - Registry contract
+  - Fee manager contract
 
-This ensures wallet creation is controlled and uses only an approved implementation.
+### 🗳️ Upgrade Governance
 
-## Contract Methods
+- Proposal-based upgrade system
+- Multi-voter approval mechanism
+- Admin-triggered execution after approval
 
-### `__constructor(e, admin, registry, wasm)`
+---
+
+## 🧱 Contract Overview
+
+- **Contract Name:** `FactoryContract`
+- **Trait:** `FactoryTrait`
+- **Language:** Rust (Soroban SDK)
+
+Source: :contentReference[oaicite:0]{index=0}
+
+---
+
+## 🚀 Initialization
+
+### `__constructor`
 
 Initializes the factory contract.
 
-Sets:
+#### Parameters:
 
-- admin address
-- registry address
-- latest wallet WASM hash
+- `admin: Address` — contract administrator
+- `registry: Address` — identity/registry contract
+- `fee_manager: Address` — fee management contract
+- `wasm: BytesN<32>` — initial wallet WASM hash
 
-This can only succeed once. If the contract is already initialized, it returns:
+#### Behavior:
 
-- `ContractError::AlreadyInitialized`
-
----
-
-### `create_wallet(e, passkey, bls_keys)`
-
-Deploys a new wallet contract using the currently stored latest wallet WASM hash.
-
-Parameters:
-
-- `passkey: BytesN<77>` — the wallet's initial passkey
-- `bls_keys: Vec<BytesN<96>>` — initial BLS public keys for the wallet
-
-Returns:
-
-- the deployed wallet contract address
-
-This function uses the current approved wallet implementation stored in factory state.
+- Can only be called once
+- Sets core configuration
+- Initializes wallet version
+- Adds admin as initial governance voter
 
 ---
 
-### `get_latest_version(e)`
+## 🪪 Wallet Creation
 
-Returns the currently approved wallet WASM hash.
+### `create_wallet`
 
-Returns:
+Creates a new wallet instance.
 
-- `BytesN<32>`
+#### Parameters:
 
-If no version is set, it returns:
+- `passkey: BytesN<77>` — wallet identity/passkey
+- `bls_keys: Vec<BytesN<96>>` — optional BLS public keys
 
-- `ContractError::VersionNotFound`
+#### Returns:
 
----
+- `Address` — newly created wallet address
 
-### `get_admin(e)`
+#### Notes:
 
-Returns the current factory admin address.
-
----
-
-### `get_registry(e)`
-
-Returns the current registry contract address.
+- Wallet creation is permissionless at this level
+- Additional validation may exist in downstream logic
 
 ---
 
-### `set_latest_wallet(e, wasm)`
+## 📖 Read Methods
 
-Admin-only function.
+### `get_wallet_version`
 
-Updates the latest approved wallet WASM hash used for future wallet deployments.
+Returns the current approved wallet WASM hash.
 
-Parameters:
+### `get_admin`
 
-- `wasm: BytesN<32>`
+Returns the current admin address.
 
----
+### `get_registry`
 
-### `update_admin(e, new_admin)`
+Returns the registry contract address.
 
-Admin-only function.
+### `get_fee_manager`
 
-Updates the factory admin address.
-
-Parameters:
-
-- `new_admin: Address`
+Returns the fee manager contract address.
 
 ---
 
-### `update_registry(e, registry)`
+## ⚙️ Admin Functions
 
-Admin-only function.
+All functions require **admin authorization**.
 
-Updates the registry contract address.
+### `update_admin(new_admin: Address)`
 
-Parameters:
+Updates the admin address.
 
-- `registry: Address`
+### `update_registry(registry: Address)`
+
+Updates the registry contract.
+
+### `update_fee_manager(fee_manager: Address)`
+
+Updates the fee manager contract.
 
 ---
 
-### `upgrade(e, new_wasm_hash)`
+## 🗳️ Governance & Upgrades
 
-Admin-only function.
+### `propose_upgrade`
 
-Upgrades the factory contract itself to a new WASM hash.
+Creates a new upgrade proposal.
 
-Parameters:
+#### Parameters:
 
+- `proposal_type: String`
 - `new_wasm_hash: BytesN<32>`
 
-## Access Control
+---
 
-The following functions are restricted to the factory admin:
+### `add_voter`
 
-- `set_latest_wallet`
-- `update_admin`
-- `update_registry`
-- `upgrade`
+Adds a new governance voter.
 
-Admin authentication is enforced through internal access control logic.
+#### Parameters:
 
-## Wallet Deployment Model
+- `voter: Address`
 
-Wallets are not deployed from arbitrary user-supplied WASM hashes.
+---
 
-Instead, the factory stores an approved wallet WASM hash and uses that value when deploying new wallets.
+### `cast_vote`
 
-This design improves:
+Casts a vote on an active proposal.
 
-- security
-- consistency
-- auditability
-- upgrade control
+#### Parameters:
 
-## Initialization Flow
+- `voter: Address`
+- `wasm_hash: BytesN<32>`
 
-Recommended deployment flow:
+---
 
-1. deploy the wallet contract code and obtain its WASM hash
-2. deploy the identity registry contract
-3. deploy the factory contract
-4. call the constructor with:
-   - admin address
-   - registry address
-   - wallet WASM hash
+### `apply_upgrade`
 
-After that, wallet creation can begin through the factory.
+Executes a successful upgrade proposal.
 
-## Security Notes
+#### Returns:
 
-- initialization is protected against multiple executions
-- admin-only methods require authorization
-- wallet deployments use an approved implementation hash stored in factory state
-- factory upgrades are restricted to admin
+- `BytesN<32>` — applied WASM hash
 
-## Intended Role in the SocketFi System
+---
 
-The factory is one part of the wider SocketFi contract architecture:
+### `cancel_proposal`
 
-- `factory` — deploys wallets and manages wallet implementation versions
-- `wallet` — user smart wallet contract
-- `identity_registry` — manages verified identity and social profile links
-- `shared` — shared types, errors, constants, and utilities
+Cancels the active upgrade proposal.
 
-## Errors
+---
 
-This contract uses the shared `ContractError` enum from `socketfi-shared`.
+## 🔐 Security Model
 
-Common errors include:
+- **Admin**
 
-- `AlreadyInitialized`
-- `VersionNotFound`
+  - Controls system configuration
+  - Manages governance lifecycle
+  - Executes upgrades
 
-Other shared errors may also be returned depending on internal logic.
+- **Voters**
 
-## Notes for Auditors
+  - Participate in upgrade voting
+  - Must be explicitly approved
 
-Key audit considerations:
+- **Users**
+  - Can create wallets permissionlessly
 
-- wallet creation is controlled by a stored approved WASM hash
-- administrative mutation paths are explicitly restricted
-- constructor-based initialization is protected against reinitialization
-- contract upgrade capability is present and admin-gated
+---
+
+## 📡 Events
+
+The contract emits events for key actions:
+
+- `WalletCreationEvent`
+- `UpdateAdminEvent`
+- `UpdateRegistryEvent`
+- `UpdateFeeManagerEvent`
+- `AddVoterEvent`
+
+---
+
+## ⚠️ Notes & Considerations
+
+- Initialization is **one-time only**
+- Wallet creation is currently **permissionless**
+- `proposal_type` uses `String` (consider enum for stricter validation)
+- Ensure voter duplication is prevented in storage layer
+- Upgrade execution logic is enforced in the upgrade module
+
+---
+
+## 🧪 Integration Notes
+
+- Designed to work with:
+  - Wallet contracts (WASM versions)
+  - Registry/identity contracts
+  - Fee manager contracts
+- Governance module handles voting logic and upgrade lifecycle
+
+---
+
+## 📌 Summary
+
+The Factory Contract acts as the **control layer** of the system:
+
+- Deploys wallets
+- Manages dependencies
+- Coordinates upgrades securely through governance
+
+---
 
 ## License
 
 MIT License
+
+---
