@@ -23,12 +23,18 @@ impl UpgradeType {
     }
 }
 
-
 #[derive(Clone)]
 #[contracttype]
 pub struct WebKeyDetails {
     pub passkey: BytesN<77>,
     pub username: String,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct ValidatorSignature {
+    pub validator: BytesN<32>,
+    pub signature: BytesN<64>,
 }
 
 #[derive(Clone)]

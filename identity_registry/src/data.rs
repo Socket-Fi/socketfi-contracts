@@ -1,21 +1,27 @@
-use soroban_sdk::{contracttype, Address, Bytes, BytesN};
+use soroban_sdk::contracttype;
 
+/// Storage keys for contract instance and persistent state.
+///
+/// Design notes:
+/// - Each variant represents a distinct storage slot
+/// - Used across instance and persistent storage
+///
+/// Audit notes:
+/// - Keys must remain stable across upgrades
+/// - Renaming or removing keys breaks backward compatibility
+/// - Unused keys should be removed to avoid confusion
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
+    /// Contract admin (instance storage)
     Admin,
-    Managers,
-    SoroswapContract,
-    DappAdapterId,
-    WalletVersions,
-    WalletUsernameMap(Bytes),
-    SupportedPlatform(Bytes),
-    IsRegisteredUsername(Bytes, Bytes),
-    UsernameSmartWalletMap(Bytes, Bytes),
-    UsernameWalletMap(Bytes),
-    PasskeyWalletMap(Bytes),
-    IsSmartWallet(Address),
-    WalletVersion,
-    PreviousVersion,
+
+    /// Validator set map: Map<BytesN<32>, ()> (persistent storage)
+    Validators,
+
+    /// Trusted factory contract (instance storage)
     Factory,
+
+    /// Linked escrow contract (instance storage)
+    Escrow,
 }

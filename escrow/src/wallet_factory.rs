@@ -1,5 +1,6 @@
 #![allow(unused)]
 use crate::data::DataKey;
+use socketfi_shared::utils::string_to_bytes;
 use socketfi_shared::ContractError;
 use soroban_sdk::{xdr::ToXdr, Address, Bytes, BytesN, Env, Map, String, Vec};
 use upgrade::get_wallet_version;
