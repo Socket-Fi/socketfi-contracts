@@ -1,17 +1,15 @@
-use crate::{
-    access::{
-        authenticate_admin, has_admin, read_admin, read_fee_manager, read_registry, write_admin,
-        write_fee_manager, write_registry,
-    },
-    contract_trait::FactoryTrait,
-    wallet_factory::write_create_wallet,
-};
+use crate::{contract_trait::FactoryTrait, wallet_factory::write_create_wallet};
 use socketfi_shared::{events, ContractError};
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 use upgrade::{
     cancel_upgrade_proposal, create_upgrade_proposal, execute_upgrade,
     get_wallet_version as read_wallet_version, init_wallet_version, upgrade_add_voter,
     write_cast_vote,
+};
+
+use socketfi_access::access::{
+    authenticate_admin, has_admin, read_admin, read_fee_manager, read_registry, write_admin,
+    write_fee_manager, write_registry,
 };
 
 /// Factory contract responsible for:

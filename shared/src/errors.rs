@@ -19,10 +19,14 @@ pub enum ContractError {
     AggregatedBlsKeyNotFound = 109,
     WebKeysNotFound = 111,
     FactoryNotFound = 113,
-    EscrowNotFound = 115,
+    SocialPayNotFound = 115,
     VersionNotFound = 117,
     PlatformNotSupported = 409,
-    AlreadyInitialized = 410,
+    AlreadyInitialized = 411,
+    AssetAlreadySupported=413,
+    AssetNotSupported=415,
+    UnsupportedAsset=417,
+    
 
     // TokenAlreadySupported = 411,
     // TokenNotSupported = 413,
@@ -42,6 +46,17 @@ pub enum ContractError {
     PasskeyAlreadyLinked = 447,
     PasskeyNotLinked = 449,
     WalletWasmNotFound = 451,
+    InvalidDuration=453,
+    PaymentNotFound=455,
+    PaymentNotClaimable=457,
+    PaymentExpired=459,
+    UnauthorizedClaim=461,
+    PaymentNotRefundable=463,
+    NotPaymentSender=465,
+    PaymentNotExpired=467,
+
+
+
     // InvalidToken = 427,
     // InvalidReceiverAddress = 429,
     // AlreadyNodeOperator = 505,

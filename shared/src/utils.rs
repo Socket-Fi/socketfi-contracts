@@ -168,6 +168,28 @@ pub fn passkey_wallet_key(e: &Env, passkey: BytesN<77>) -> Result<DataKey, Contr
     Ok(DataKey::PasskeyWalletMap(e.crypto().sha256(&salt).into()))
 }
 
+pub fn userid_payment_key(
+    e: &Env,
+    platform_str: String,
+    user_id: String,
+) -> Result<BytesN<32>, ContractError> {
+    let platform = SocialPlatform::is_platform_supported(platform_str)?;
+
+    validate_userid(user_id.clone())?;
+
+    let mut salt = Bytes::new(e);
+
+    salt.append(&String::from_str(e, "userid_wallet").into());
+    salt.push_back(0);
+
+    salt.append(&String::from_str(e, platform.as_str()).into());
+    salt.push_back(0);
+
+    salt.append(&user_id.into());
+
+    Ok(e.crypto().sha256(&salt).into())
+}
+
 /// Extends TTL for contract instance storage.
 ///
 /// Design notes:

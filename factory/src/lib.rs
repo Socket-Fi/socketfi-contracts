@@ -1,7 +1,4 @@
 #![no_std]
-
-/// Access control and storage read/write helpers.
-mod access;
 /// Main contract implementation and exported entrypoints.
 mod contract;
 /// Public trait describing the factory contract interface.

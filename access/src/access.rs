@@ -1,7 +1,18 @@
-use soroban_sdk::{Address, Env};
-
-use crate::data::DataKey;
 use socketfi_shared::ContractError;
+use soroban_sdk::{contracttype, Address, Bytes, Env};
+
+#[derive(Clone)]
+#[contracttype]
+pub enum DataKey {
+    Admin,
+    Factory,
+    Registry,
+    FeeManager,
+    SocialPayments,
+    PaymentManager,
+    UseridWalletMap(Bytes),
+    PasskeyWalletMap(Bytes),
+}
 
 /// Returns `true` if the contract admin has already been initialized.
 ///
@@ -100,23 +111,23 @@ pub fn write_factory(e: &Env, factory: &Address) {
     e.storage().instance().set(&key, factory);
 }
 
-/// Reads the configured escrow contract address.
+/// Reads the configured social_payments contract address.
 ///
 /// Returns:
-/// - `Ok(Address)` if escrow is set
-/// - `Err(ContractError::EscrowNotFound)` otherwise
+/// - `Ok(Address)` if social_payments is set
+/// - `Err(ContractError::SocialPaymentsNotFound)` otherwise
 ///
 /// Audit notes:
 /// - Reads from instance storage; instance TTL must be maintained.
-pub fn read_escrow(e: &Env) -> Result<Address, ContractError> {
-    let key = DataKey::Escrow;
+pub fn read_social_payments(e: &Env) -> Result<Address, ContractError> {
+    let key = DataKey::SocialPayments;
     e.storage()
         .instance()
         .get(&key)
-        .ok_or(ContractError::EscrowNotFound)
+        .ok_or(ContractError::SocialPayNotFound)
 }
 
-/// Writes the configured escrow contract address.
+/// Writes the configured social_payments contract address.
 ///
 /// Design notes:
 /// - Low-level storage helper only.
@@ -126,7 +137,46 @@ pub fn read_escrow(e: &Env) -> Result<Address, ContractError> {
 /// - Must only be called from trusted/admin-controlled flows.
 /// - No business-rule validation is enforced here
 ///   (e.g. uniqueness vs admin/factory or other address constraints).
-pub fn write_escrow(e: &Env, escrow: &Address) {
-    let key = DataKey::Escrow;
-    e.storage().instance().set(&key, escrow);
+pub fn write_social_payments(e: &Env, social_payment: &Address) {
+    let key = DataKey::SocialPayments;
+    e.storage().instance().set(&key, social_payment);
+}
+
+/// Reads the configured registry contract address.
+pub fn read_registry(e: &Env) -> Result<Address, ContractError> {
+    let key = DataKey::Registry;
+
+    e.storage()
+        .instance()
+        .get(&key)
+        .ok_or(ContractError::RegistryNotFound)
+}
+
+/// Writes the registry contract address to instance storage.
+///
+/// Audit note:
+/// - caller must enforce authorization where required
+pub fn write_registry(e: &Env, registry: &Address) {
+    let key = DataKey::Registry;
+    e.storage().instance().set(&key, registry);
+}
+
+
+/// Reads the configured fee manager contract address.
+pub fn read_fee_manager(e: &Env) -> Result<Address, ContractError> {
+    let key = DataKey::FeeManager;
+
+    e.storage()
+        .instance()
+        .get(&key)
+        .ok_or(ContractError::FeeManagerNotFound)
+}
+
+/// Writes the fee manager contract address to instance storage.
+///
+/// Audit note:
+/// - caller must enforce authorization where required
+pub fn write_fee_manager(e: &Env, fee_manager: &Address) {
+    let key = DataKey::FeeManager;
+    e.storage().instance().set(&key, fee_manager);
 }

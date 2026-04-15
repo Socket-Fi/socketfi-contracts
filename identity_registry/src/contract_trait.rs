@@ -11,7 +11,7 @@ pub trait RegistryTrait {
         e: Env,
         admin: Address,
         factory: Address,
-        escrow: Address,
+        social_payments: Address,
     ) -> Result<(), ContractError>;
 
     // ---------------------------------------------------------------------
@@ -57,7 +57,7 @@ pub trait RegistryTrait {
 
     fn get_factory(e: Env) -> Result<Address, ContractError>;
 
-    fn get_escrow(e: Env) -> Result<Address, ContractError>;
+    fn get_social_payments(e: Env) -> Result<Address, ContractError>;
 
     // ---------------------------------------------------------------------
     // Admin / Config

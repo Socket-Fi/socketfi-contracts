@@ -59,7 +59,7 @@ impl SocialPlatform {
     pub fn is_platform_supported(s: String) -> Result<Self, ContractError> {
         let e = s.env();
 
-        if s == String::from_str(&e, "x") || s == String::from_str(&e, "twitter") {
+        if s == String::from_str(&e, "x")  {
             return Ok(Self::X);
         }
         if s == String::from_str(&e, "discord") {

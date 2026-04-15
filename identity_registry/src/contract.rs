@@ -3,10 +3,6 @@ use soroban_sdk::{
 };
 
 use crate::{
-    access::{
-        authenticate_admin, has_admin, read_escrow, read_factory, write_admin, write_escrow,
-        write_factory,
-    },
     contract_trait::RegistryTrait,
     registry::{
         read_passkey_wallet_map, read_userid_wallet_map, write_passkey_wallet_map,
@@ -16,6 +12,10 @@ use crate::{
         read_is_validator, read_threshold, read_validators, write_add_validator,
         write_remove_validator,
     },
+};
+use socketfi_access::access::{
+    authenticate_admin, has_admin, read_factory, read_social_payments, write_admin, write_factory,
+    write_social_payments,
 };
 use socketfi_shared::{
     events,
@@ -29,10 +29,10 @@ use upgrade::{
 };
 
 #[contract]
-pub struct RegistryContract;
+pub struct Registry;
 
 #[contractimpl]
-impl RegistryTrait for RegistryContract {
+impl RegistryTrait for Registry {
     // ---------------------------------------------------------------------
     // Initialization
     // ---------------------------------------------------------------------
@@ -42,7 +42,7 @@ impl RegistryTrait for RegistryContract {
     /// Stores:
     /// - `admin`: privileged controller for registry configuration
     /// - `factory`: trusted contract allowed to register passkey mappings
-    /// - `escrow`: linked escrow / pending-payments contract
+    /// - `social payments`: linked social payments / pending-payments contract
     ///
     /// Security:
     /// - Single-use initialization guarded by `has_admin`
@@ -54,7 +54,7 @@ impl RegistryTrait for RegistryContract {
         e: Env,
         admin: Address,
         factory: Address,
-        escrow: Address,
+        social_payments: Address,
     ) -> Result<(), ContractError> {
         if has_admin(&e) {
             return Err(ContractError::AlreadyInitialized);
@@ -62,7 +62,7 @@ impl RegistryTrait for RegistryContract {
 
         write_admin(&e, &admin);
         write_factory(&e, &factory);
-        write_escrow(&e, &escrow);
+        write_social_payments(&e, &social_payments);
 
         Ok(())
     }
@@ -94,7 +94,7 @@ impl RegistryTrait for RegistryContract {
     /// - Full XDR encoding is used for all signed fields to avoid ambiguous encoding
     /// - Replay protection is not currently included
     /// - Storage-layer rebinding prevention acts as the current one-time-use guard
-    /// - Consider emitting an identity-bound event for indexers / escrow release flows
+    /// - Consider emitting an identity-bound event for indexers / social payments release flows
     fn verify_identity_binding(
         e: Env,
         wallet: Address,
@@ -233,9 +233,9 @@ impl RegistryTrait for RegistryContract {
         read_factory(&e)
     }
 
-    /// Returns configured escrow contract address.
-    fn get_escrow(e: Env) -> Result<Address, ContractError> {
-        read_escrow(&e)
+    /// Returns configured social payments contract address.
+    fn get_social_payments(e: Env) -> Result<Address, ContractError> {
+        read_social_payments(&e)
     }
 
     // ---------------------------------------------------------------------
