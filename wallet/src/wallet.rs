@@ -134,6 +134,7 @@ impl WalletTrait for Wallet {
         }
 
         send_token(&env, &to, &token, amount);
+        
         Ok(())
     }
 

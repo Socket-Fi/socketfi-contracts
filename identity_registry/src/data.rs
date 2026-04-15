@@ -13,15 +13,6 @@ use soroban_sdk::contracttype;
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
-    /// Contract admin (instance storage)
-    Admin,
-
     /// Validator set map: Map<BytesN<32>, ()> (persistent storage)
     Validators,
-
-    /// Trusted factory contract (instance storage)
-    Factory,
-
-    /// Linked escrow contract (instance storage)
-    Escrow,
 }
