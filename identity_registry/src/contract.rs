@@ -13,95 +13,61 @@ use crate::{
         write_remove_validator,
     },
 };
-use socketfi_access::access::{
-    authenticate_admin, has_admin, read_factory, read_social_payments, write_admin, write_factory,
-    write_social_payments,
-};
+use socketfi_access::access::{authenticate_admin, has_admin, read_factory, write_admin};
 use socketfi_shared::{
     events,
-    types::{SocialPlatform, ValidatorSignature},
+    registry_errors::RegistryError,
+    registry_types::{SocialPlatform, ValidatorSignature},
     utils::validate_userid,
-    ContractError,
 };
 use upgrade::{
-    cancel_upgrade_proposal, create_upgrade_proposal, execute_upgrade, upgrade_add_voter,
-    write_cast_vote,
+    cancel_upgrade_proposal, create_upgrade_proposal, errors::UpgradeError, execute_upgrade,
+    upgrade_add_voter, upgrade_remove_voter, write_cast_vote,
 };
 
+/// Identity registry contract.
+///
+/// Notes:
+/// - Manages wallet bindings for user identities and passkeys.
+/// - Uses validator signatures for identity verification.
+/// - Includes admin control and upgrade governance.
 #[contract]
 pub struct Registry;
 
 #[contractimpl]
 impl RegistryTrait for Registry {
-    // ---------------------------------------------------------------------
-    // Initialization
-    // ---------------------------------------------------------------------
+    // initialization
 
-    /// Initializes the registry contract.
+    /// Initialize registry.
     ///
-    /// Stores:
-    /// - `admin`: privileged controller for registry configuration
-    /// - `factory`: trusted contract allowed to register passkey mappings
-    /// - `social payments`: linked social payments / pending-payments contract
-    ///
-    /// Security:
-    /// - Single-use initialization guarded by `has_admin`
-    ///
-    /// Audit notes:
-    /// - Assumes constructor execution is atomic
-    /// - If instance TTL is not maintained, config values may expire
-    fn __constructor(
-        e: Env,
-        admin: Address,
-        factory: Address,
-        social_payments: Address,
-    ) -> Result<(), ContractError> {
+    /// Notes:
+    /// - Sets initial admin.
+    /// - Intended to run once.
+    fn __constructor(e: Env, admin: Address) -> Result<(), UpgradeError> {
         if has_admin(&e) {
-            return Err(ContractError::AlreadyInitialized);
+            return Err(UpgradeError::AlreadyInitialized);
         }
 
         write_admin(&e, &admin);
-        write_factory(&e, &factory);
-        write_social_payments(&e, &social_payments);
 
         Ok(())
     }
 
-    // ---------------------------------------------------------------------
-    // Identity Core
-    // ---------------------------------------------------------------------
+    // identity core
 
-    /// Verifies validator-approved identity binding and stores the mapping.
+    /// Verify identity and bind wallet.
     ///
-    /// Authorization:
-    /// - Wallet owner must authorize
-    ///
-    /// Signed payload fields:
-    /// - action name: `"verify_identity_binding"`
-    /// - current contract address
-    /// - wallet address
-    /// - canonical platform string
-    /// - validated `user_id`
-    ///
-    /// Security properties:
-    /// - Contract address provides domain separation
-    /// - Validator membership is checked on-chain
-    /// - Duplicate validator signatures are rejected
-    /// - Platform is canonicalized before signing
-    /// - `user_id` is validated before signing
-    ///
-    /// Audit notes:
-    /// - Full XDR encoding is used for all signed fields to avoid ambiguous encoding
-    /// - Replay protection is not currently included
-    /// - Storage-layer rebinding prevention acts as the current one-time-use guard
-    /// - Consider emitting an identity-bound event for indexers / social payments release flows
+    /// Notes:
+    /// - Requires wallet authorization.
+    /// - Validates platform, user id, and validator signatures.
+    /// - Writes `(platform, user_id) -> wallet` mapping on success.
     fn verify_identity_binding(
         e: Env,
         wallet: Address,
         user_id: String,
         platform_str: String,
         signatures: Vec<ValidatorSignature>,
-    ) -> Result<(), ContractError> {
+    ) -> Result<(), RegistryError> {
         wallet.require_auth();
 
         let platform = SocialPlatform::is_platform_supported(platform_str)?;
@@ -109,11 +75,11 @@ impl RegistryTrait for Registry {
 
         let threshold = read_threshold(&e);
         if threshold == 0 {
-            return Err(ContractError::InvalidThreshold);
+            return Err(RegistryError::InvalidThreshold);
         }
 
         if signatures.len() as u32 != threshold {
-            return Err(ContractError::IncorrectNumberOfSignatures);
+            return Err(RegistryError::IncorrectNumberOfSignatures);
         }
 
         let mut seen = Map::<BytesN<32>, bool>::new(&e);
@@ -122,11 +88,11 @@ impl RegistryTrait for Registry {
             let validator = s.validator.clone();
 
             if !read_is_validator(&e, validator.clone()) {
-                return Err(ContractError::NotValidator);
+                return Err(RegistryError::NotValidator);
             }
 
             if seen.get(validator.clone()).unwrap_or(false) {
-                return Err(ContractError::DuplicateValidator);
+                return Err(RegistryError::DuplicateValidator);
             }
 
             seen.set(validator, true);
@@ -146,195 +112,167 @@ impl RegistryTrait for Registry {
 
         write_userid_wallet_map(&e, String::from_str(&e, platform.as_str()), user_id, wallet)?;
 
-        // Recommended:
-        // emit IdentityBound event here
-
         Ok(())
     }
 
-    /// Registers a passkey -> wallet mapping.
+    /// Set passkey -> wallet mapping.
     ///
-    /// Authorization:
-    /// - Factory only
-    ///
-    /// Audit notes:
-    /// - Trust model assumes the configured factory is the sole authorized creator
-    ///   of passkey mappings
-    /// - Does not require direct wallet authorization
-    /// - Rebinding protection is enforced in storage write logic
+    /// Notes:
+    /// - Factory only.
+    /// - Used for wallet lookup by passkey.
     fn set_passkey_wallet_map(
         e: Env,
         passkey: BytesN<77>,
         wallet: Address,
-    ) -> Result<(), ContractError> {
-        read_factory(&e)?.require_auth();
+    ) -> Result<(), RegistryError> {
+        read_factory(&e).unwrap().require_auth();
         write_passkey_wallet_map(&e, passkey, wallet)
     }
 
-    // ---------------------------------------------------------------------
-    // Validator Management
-    // ---------------------------------------------------------------------
+    // validator management
 
-    /// Adds a validator public key.
+    /// Add validator.
     ///
-    /// Authorization:
-    /// - Admin only
-    ///
-    /// Audit notes:
-    /// - Validator membership directly affects identity binding authorization
-    fn add_validator(e: Env, validator: BytesN<32>) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
-        write_add_validator(&e, validator)
+    /// Notes:
+    /// - Admin only.
+    /// - Expands trusted signer set.
+    fn add_validator(e: Env, validator: BytesN<32>) {
+        authenticate_admin(&e);
+        write_add_validator(&e, validator);
     }
 
-    /// Removes a validator public key.
+    /// Remove validator.
     ///
-    /// Authorization:
-    /// - Admin only
-    ///
-    /// Audit notes:
-    /// - Removing validators changes the effective signer set for future bindings
-    fn remove_validator(e: Env, validator: BytesN<32>) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
+    /// Notes:
+    /// - Admin only.
+    /// - Revokes validator trust for future checks.
+    fn remove_validator(e: Env, validator: BytesN<32>) {
+        authenticate_admin(&e);
         write_remove_validator(&e, validator)
     }
 
-    /// Returns the current validator set.
-    fn get_validators(e: Env) -> Result<Vec<BytesN<32>>, ContractError> {
+    /// Get validators.
+    fn get_validators(e: Env) -> Vec<BytesN<32>> {
         read_validators(&e)
     }
 
-    // ---------------------------------------------------------------------
-    // Read APIs
-    // ---------------------------------------------------------------------
+    // read APIs
 
-    /// Returns wallet bound to a `(platform, user_id)` pair, if present.
+    /// Get wallet by `(platform, user_id)`.
     ///
-    /// Audit notes:
-    /// - Lookup correctness depends on the same canonicalization rules used during write
+    /// Notes:
+    /// - Returns `None` if not found.
     fn get_wallet_by_userid(
         e: Env,
         platform: String,
         user_id: String,
-    ) -> Result<Option<Address>, ContractError> {
+    ) -> Result<Option<Address>, RegistryError> {
         read_userid_wallet_map(&e, platform, user_id)
     }
 
-    /// Returns wallet bound to a passkey, if present.
+    /// Get wallet by passkey.
+    ///
+    /// Notes:
+    /// - Returns `None` if not found.
     fn get_wallet_by_passkey(
         e: Env,
         passkey: BytesN<77>,
-    ) -> Result<Option<Address>, ContractError> {
+    ) -> Result<Option<Address>, RegistryError> {
         read_passkey_wallet_map(&e, passkey)
     }
 
-    /// Returns configured factory contract address.
-    fn get_factory(e: Env) -> Result<Address, ContractError> {
-        read_factory(&e)
-    }
+    // admin/config
 
-    /// Returns configured social payments contract address.
-    fn get_social_payments(e: Env) -> Result<Address, ContractError> {
-        read_social_payments(&e)
-    }
-
-    // ---------------------------------------------------------------------
-    // Admin / Config
-    // ---------------------------------------------------------------------
-
-    /// Updates the admin address.
+    /// Update admin.
     ///
-    /// Authorization:
-    /// - Current admin only
-    ///
-    /// Audit notes:
-    /// - Consider emitting an event for admin rotation
-    fn set_admin(e: Env, new_admin: Address) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
+    /// Notes:
+    /// - Admin only.
+    /// - Changes control over privileged registry actions.
+    fn set_admin(e: Env, new_admin: Address) {
+        authenticate_admin(&e);
         write_admin(&e, &new_admin);
-        Ok(())
     }
 
-    // ---------------------------------------------------------------------
-    // Upgrade Governance
-    // ---------------------------------------------------------------------
+    // upgrade governance
 
-    /// Applies an approved upgrade proposal.
+    /// Execute approved upgrade.
     ///
-    /// Authorization:
-    /// - Admin only
-    ///
-    /// Audit notes:
-    /// - Proposal voting / pass / deadline checks are enforced in `execute_upgrade`
-    fn apply_upgrade(e: Env) -> Result<BytesN<32>, ContractError> {
-        authenticate_admin(&e)?;
+    /// Notes:
+    /// - Admin only.
+    /// - Applies current passed proposal.
+    fn apply_upgrade(e: Env) -> Result<BytesN<32>, UpgradeError> {
+        authenticate_admin(&e);
         execute_upgrade(&e)
     }
 
-    /// Creates a new upgrade proposal.
+    /// Create upgrade proposal.
     ///
-    /// Authorization:
-    /// - Admin only
+    /// Notes:
+    /// - Admin only.
+    /// - Starts governance flow for new wasm hash.
     fn propose_upgrade(
         e: Env,
         proposal_type: String,
         new_wasm_hash: BytesN<32>,
-    ) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
-        create_upgrade_proposal(&e, proposal_type, &new_wasm_hash)?;
-        Ok(())
+    ) -> Result<(), UpgradeError> {
+        authenticate_admin(&e);
+        create_upgrade_proposal(&e, proposal_type, &new_wasm_hash)
     }
 
-    /// Adds a governance voter.
+    /// Add governance voter.
     ///
-    /// Authorization:
-    /// - Admin only
-    ///
-    /// Audit notes:
-    /// - Event emission improves governance observability
-    fn add_voter(e: Env, voter: Address) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
-        upgrade_add_voter(&e, &voter)?;
+    /// Notes:
+    /// - Admin only.
+    fn add_voter(e: Env, voter: Address) {
+        authenticate_admin(&e);
+        upgrade_add_voter(&e, &voter);
 
         events::AddVoterEvent {
             value: voter.clone(),
         }
         .publish(&e);
-
-        Ok(())
     }
 
-    /// Casts an upgrade vote.
+    /// Remove governance voter.
     ///
-    /// Authorization:
-    /// - Voter must authorize
-    fn cast_vote(e: Env, voter: Address, wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+    /// Notes:
+    /// - Admin only.
+    fn remove_voter(e: Env, voter: Address) {
+        authenticate_admin(&e);
+        upgrade_remove_voter(&e, &voter);
+
+        events::RemoveVoterEvent {
+            value: voter.clone(),
+        }
+        .publish(&e);
+    }
+
+    /// Cast vote on active proposal.
+    ///
+    /// Notes:
+    /// - Voter must authorize.
+    /// - Records approval for supplied hash.
+    fn cast_vote(e: Env, voter: Address, wasm_hash: BytesN<32>) -> Result<(), UpgradeError> {
         voter.require_auth();
         write_cast_vote(&e, &voter, &wasm_hash)?;
         Ok(())
     }
 
-    /// Cancels the active upgrade proposal.
+    /// Cancel active proposal.
     ///
-    /// Authorization:
-    /// - Admin only
-    fn cancel_proposal(e: Env) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
-        cancel_upgrade_proposal(&e)?;
-        Ok(())
+    /// Notes:
+    /// - Admin only.
+    fn cancel_proposal(e: Env) -> Result<(), UpgradeError> {
+        authenticate_admin(&e);
+        cancel_upgrade_proposal(&e)
     }
 
-    /// Performs a direct contract WASM upgrade.
+    /// Upgrade contract wasm directly.
     ///
-    /// Authorization:
-    /// - Admin only
-    ///
-    /// Audit notes:
-    /// - Highly privileged operation
-    /// - Should remain tightly controlled
-    fn upgrade(e: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
+    /// Notes:
+    /// - Admin only.
+    fn upgrade(e: Env, new_wasm_hash: BytesN<32>) {
+        authenticate_admin(&e);
         e.deployer().update_current_contract_wasm(new_wasm_hash);
-        Ok(())
     }
 }

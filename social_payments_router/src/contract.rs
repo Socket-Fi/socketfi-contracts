@@ -16,57 +16,43 @@ use socketfi_access::access::{
     authenticate_admin, has_admin, read_registry, write_admin, write_registry,
 };
 use socketfi_shared::{
+    constants::DEFAULT_CLAIM_PERIOD,
     events,
+    registry_errors::RegistryError,
     tokens::{
-        read_is_supported_asset, read_supported_assets, send_asset, take_asset,
-        write_is_supported_asset, write_not_supported_asset,
+        read_is_supported_asset, read_supported_assets, send_asset, take_asset, write_add_asset,
+        write_remove_asset,
     },
     utils::validate_userid,
-    ContractError,
 };
 use upgrade::{
-    cancel_upgrade_proposal, create_upgrade_proposal, execute_upgrade, upgrade_add_voter,
-    write_cast_vote,
+    cancel_upgrade_proposal, create_upgrade_proposal, errors::UpgradeError, execute_upgrade,
+    upgrade_add_voter, write_cast_vote,
 };
 
-/// -----------------------------------------------------------------------------
-/// SocialPayments Contract
-/// -----------------------------------------------------------------------------
+/// Social payments router contract.
 ///
-/// Purpose:
-/// - Allows users to send assets to a social identity (`platform + user_id`)
-///   instead of requiring the recipient wallet address upfront.
-/// - If the identity is already linked in the registry, payment is sent directly.
-/// - Otherwise, a pending payment is created and can later be claimed by the
-///   wallet that proves ownership of that identity.
-/// - Also supports refunds, supported-asset configuration, admin management,
-///   and upgrade governance.
-///
-/// Payment model:
-/// - Direct path:
-///   sender -> registry lookup succeeds -> recipient wallet receives asset
-///
-/// - Pending path:
-///   sender -> registry lookup fails -> payment stored as pending
-///   -> rightful owner later claims
-///
-/// -----------------------------------------------------------------------------
+/// Notes:
+/// - Routes payments to social identities.
+/// - Sends directly when identity resolves to a wallet.
+/// - Otherwise stores a pending payment for later claim.
+/// - Includes admin config and upgrade governance.
 #[contract]
 pub struct SocialPayments;
 
 #[contractimpl]
 impl SocialPaymentsTrait for SocialPayments {
-    // -------------------------------------------------------------------------
-    // 1) Initialization
-    // -------------------------------------------------------------------------
-    //
-    // Security notes:
-    // - Constructor must only succeed once.
-    // - Admin and registry are foundational trust anchors.
-    // - Nonce starts at zero and is used in payment id generation.
-    fn __constructor(e: Env, admin: Address, registry: Address) -> Result<(), ContractError> {
+    // initialization
+
+    /// Initialize router state.
+    ///
+    /// Notes:
+    /// - Sets admin and registry.
+    /// - Initializes payment nonce.
+    /// - Intended to run once.
+    fn __constructor(e: Env, admin: Address, registry: Address) -> Result<(), UpgradeError> {
         if has_admin(&e) {
-            return Err(ContractError::AlreadyInitialized);
+            return Err(UpgradeError::AlreadyInitialized);
         }
 
         write_admin(&e, &admin);
@@ -76,18 +62,15 @@ impl SocialPaymentsTrait for SocialPayments {
         Ok(())
     }
 
-    // -------------------------------------------------------------------------
-    // 2) User Payment Actions
-    // -------------------------------------------------------------------------
-    //
-    // Flow:
-    // 1. Validate supported asset, auth, amount, user id, duration.
-    // 2. Query the registry for a wallet bound to (platform, user_id).
-    // 3. If wallet exists:
-    //      - transfer directly to resolved wallet
-    // 4. Otherwise:
-    //      - escrow into pending payment state
-    //      - store and index by identity and sender
+    // payments
+
+    /// Pay to a social identity.
+    ///
+    /// Notes:
+    /// - Requires sender auth.
+    /// - Asset must be supported.
+    /// - Sends directly if registry resolves a wallet.
+    /// - Otherwise stores a pending payment and indexes it by identity and sender.
     fn pay_to_social(
         e: Env,
         from: Address,
@@ -95,28 +78,26 @@ impl SocialPaymentsTrait for SocialPayments {
         user_id: String,
         asset: Address,
         amount: i128,
-        duration: u64,
-    ) -> Result<PaymentResult, ContractError> {
+        duration: Option<u64>,
+    ) -> Result<PaymentResult, RegistryError> {
         if !read_is_supported_asset(&e, asset.clone()) {
-            return Err(ContractError::UnsupportedAsset);
+            return Err(RegistryError::UnsupportedAsset);
         }
 
         from.require_auth();
 
         if amount <= 0 {
-            return Err(ContractError::InvalidAmount);
+            return Err(RegistryError::InvalidAmount);
         }
 
         validate_userid(user_id.clone())?;
 
-        if duration == 0 {
-            return Err(ContractError::InvalidDuration);
-        }
+        let claim_periond: u64 = duration.unwrap_or(DEFAULT_CLAIM_PERIOD);
 
         let args: Vec<Val> = vec![&e, platform.into_val(&e), user_id.into_val(&e)];
 
         if let Some(to) = e.invoke_contract(
-            &read_registry(&e)?,
+            &read_registry(&e).unwrap(),
             &Symbol::new(&e, "get_wallet_by_userid"),
             args,
         ) {
@@ -141,8 +122,8 @@ impl SocialPaymentsTrait for SocialPayments {
 
             let created_at = now(&e);
             let expires_at = created_at
-                .checked_add(duration)
-                .ok_or(ContractError::InvalidExpiration)?;
+                .checked_add(claim_periond)
+                .expect("expects a valid expiration");
 
             let payment = PendingPayment {
                 payment_id: payment_id.clone(),
@@ -157,36 +138,41 @@ impl SocialPaymentsTrait for SocialPayments {
                 claimed_by: None,
             };
 
-            write_payment(&e, &payment_id.clone(), &payment)?;
+            write_payment(&e, &payment_id.clone(), &payment);
             append_identity_payment(&e, platform, user_id, payment_id.clone())?;
-            let n = nonce.checked_add(1).ok_or(ContractError::Overflow)?;
+            let n = nonce.checked_add(1).expect("invalid value");
             write_payment_nonce(&e, n);
-            append_sender_payment(&e, from, payment_id.clone())?;
+            append_sender_payment(&e, from, payment_id.clone());
 
             Ok(PaymentResult::Pending(payment_id))
         }
     }
 
-    // Claims a single pending payment.
+    /// Claim a single pending payment.
+    ///
+    /// Notes:
+    /// - Requires claimer auth.
+    /// - Claim validation is delegated to `claim_one`.
     fn claim_payment(
         e: Env,
         claimer: Address,
         payment_id: BytesN<32>,
-    ) -> Result<(), ContractError> {
+    ) -> Result<(), RegistryError> {
         claimer.require_auth();
         claim_one(&e, &claimer, &payment_id)
     }
 
-    // Claims multiple pending payments in sequence.
-    //
-    // Notes:
-    // - Entire call fails if any individual claim fails.
-    // - Review whether batch atomicity is intended.
+    /// Claim multiple pending payments.
+    ///
+    /// Notes:
+    /// - Requires claimer auth.
+    /// - Processes claims sequentially.
+    /// - Entire call fails if any claim fails.
     fn claim_payments(
         e: Env,
         claimer: Address,
         payment_ids: Vec<BytesN<32>>,
-    ) -> Result<(), ContractError> {
+    ) -> Result<(), RegistryError> {
         claimer.require_auth();
 
         for payment_id in payment_ids.iter() {
@@ -196,30 +182,31 @@ impl SocialPaymentsTrait for SocialPayments {
         Ok(())
     }
 
-    // Refunds a single payment back to its sender where refund rules allow it.
-    //
-    // Notes:
-    // - Sender must authorize.
-    // - Refund eligibility validation is delegated to `refund_one`.
+    /// Refund a single payment.
+    ///
+    /// Notes:
+    /// - Requires sender auth.
+    /// - Refund eligibility is delegated to `refund_one`.
     fn refund_payment(
         e: Env,
         sender: Address,
         payment_id: BytesN<32>,
-    ) -> Result<(), ContractError> {
+    ) -> Result<(), RegistryError> {
         sender.require_auth();
         refund_one(&e, &sender, &payment_id)
     }
 
-    // Refunds multiple payments in sequence.
-    //
-    // Notes:
-    // - Entire call fails if any individual refund fails.
-    // - Review whether batch atomicity is intended.
+    /// Refund multiple payments.
+    ///
+    /// Notes:
+    /// - Requires sender auth.
+    /// - Processes refunds sequentially.
+    /// - Entire call fails if any refund fails.
     fn refund_payments(
         e: Env,
         sender: Address,
         payment_ids: Vec<BytesN<32>>,
-    ) -> Result<(), ContractError> {
+    ) -> Result<(), RegistryError> {
         sender.require_auth();
 
         for payment_id in payment_ids.iter() {
@@ -229,183 +216,169 @@ impl SocialPaymentsTrait for SocialPayments {
         Ok(())
     }
 
-    // -------------------------------------------------------------------------
-    // 3) Read / Query Functions
-    // -------------------------------------------------------------------------
-    //
-    // These functions expose contract state to frontends, indexers, and auditors.
-    // They should remain side-effect free.
+    // queries
 
-    // Returns a stored pending payment by id.
-    fn get_payment(e: Env, payment_id: BytesN<32>) -> Result<PendingPayment, ContractError> {
+    /// Get a stored payment by id.
+    fn get_payment(e: Env, payment_id: BytesN<32>) -> Option<PendingPayment> {
         read_payment(&e, &payment_id)
     }
 
-    // Returns total number of created payment entries as tracked by nonce.
-    //
-    // Note:
-    // - This is effectively the next payment nonce / payment count tracker.
+    /// Get current payment nonce.
+    ///
+    /// Notes:
+    /// - Used for payment id generation.
+    /// - Also tracks created payment sequence.
     fn get_nonce(e: Env) -> u64 {
         read_payment_nonce(&e)
     }
 
-    // Returns all payment ids associated with a social identity.
+    /// Get payment ids for `(platform, user_id)`.
     fn get_identity_payments(
         e: Env,
         platform: String,
         user_id: String,
-    ) -> Result<Vec<BytesN<32>>, ContractError> {
+    ) -> Result<Vec<BytesN<32>>, RegistryError> {
         read_identity_payment_ids(&e, platform, user_id)
     }
 
-    // Returns all payment ids created by a given sender.
-    fn get_sender_payments(e: Env, sender: Address) -> Result<Vec<BytesN<32>>, ContractError> {
+    /// Get payment ids created by sender.
+    fn get_sender_payments(e: Env, sender: Address) -> Vec<BytesN<32>> {
         read_sender_payment_ids(&e, sender)
     }
 
-    // Computes currently claimable amount for a specific identity and asset.
-    //
-    // Inclusion rules:
-    // - payment status must be Pending
-    // - payment must not be expired
-    // - payment asset must match requested asset
-    //
-    // Notes:
-    // - Excludes expired or already processed payments.
-    // - Overflow is guarded with checked_add.
+    /// Get total currently claimable amount for identity and asset.
+    ///
+    /// Notes:
+    /// - Includes only pending, unexpired payments matching the asset.
+    /// - Excludes expired and already processed payments.
     fn get_claimable_total(
         e: Env,
         platform: String,
         user_id: String,
         asset: Address,
-    ) -> Result<i128, ContractError> {
+    ) -> Result<i128, RegistryError> {
         let ids = read_identity_payment_ids(&e, platform, user_id)?;
         let current_time = now(&e);
         let mut total: i128 = 0;
 
         for payment_id in ids.iter() {
-            let payment = read_payment(&e, &payment_id)?;
+            let payment = read_payment(&e, &payment_id).unwrap();
 
             if matches!(payment.status, PaymentStatus::Pending)
                 && current_time < payment.expires_at
                 && payment.asset == asset
             {
-                total = total
-                    .checked_add(payment.amount)
-                    .ok_or(ContractError::InvalidAmount)?;
+                total = total.checked_add(payment.amount).expect("invalid value");
             }
         }
 
         Ok(total)
     }
 
-    // Returns all currently supported assets.
+    /// Get all supported assets.
     fn get_supported_assets(e: Env) -> Vec<Address> {
         read_supported_assets(&e)
     }
 
-    // -------------------------------------------------------------------------
-    // 4) Admin / Config
-    // -------------------------------------------------------------------------
-    //
-    // All functions below are admin-gated and affect configuration.
+    // admin/config
 
-    // Adds an asset to the supported asset set.
-    fn add_supported_asset(e: Env, asset: Address) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
-        write_is_supported_asset(&e, asset)
+    /// Add supported asset.
+    ///
+    /// Notes:
+    /// - Admin only.
+    /// - Enables new payments in the asset.
+    fn add_supported_asset(e: Env, asset: Address) {
+        authenticate_admin(&e);
+        write_add_asset(&e, asset);
     }
 
-    // Removes an asset from the supported asset set.
-    fn remove_supported_asset(e: Env, asset: Address) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
-        write_not_supported_asset(&e, asset)
+    /// Remove supported asset.
+    ///
+    /// Notes:
+    /// - Admin only.
+    /// - Blocks new payments in the asset.
+    fn remove_supported_asset(e: Env, asset: Address) {
+        authenticate_admin(&e);
+        write_remove_asset(&e, asset);
     }
 
-    // Update contract admin.
-    fn set_admin(e: Env, new_admin: Address) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
+    /// Update admin.
+    ///
+    /// Notes:
+    /// - Admin only.
+    /// - Changes control over privileged router actions.
+    fn set_admin(e: Env, new_admin: Address) {
+        authenticate_admin(&e);
         write_admin(&e, &new_admin);
-        Ok(())
     }
 
-    // -------------------------------------------------------------------------
-    // 5) Upgrade Governance
-    // -------------------------------------------------------------------------
-    //
-    // Governance flow:
-    // - Admin proposes upgrade
-    // - Admin may add voters
-    // - Voters cast votes
-    // - Admin may cancel proposal
-    // - Admin applies upgrade after governance conditions are satisfied
-    // Executes a previously approved upgrade proposal.
-    fn apply_upgrade(e: Env) -> Result<BytesN<32>, ContractError> {
-        authenticate_admin(&e)?;
+    // upgrade governance
+
+    /// Execute approved upgrade proposal.
+    ///
+    /// Notes:
+    /// - Admin only.
+    /// - Applies the current passed proposal.
+    fn apply_upgrade(e: Env) -> Result<BytesN<32>, UpgradeError> {
+        authenticate_admin(&e);
         execute_upgrade(&e)
     }
 
-    /// Creates a new upgrade proposal.
+    /// Create upgrade proposal.
     ///
-    /// Authorization:
-    /// - Admin only
+    /// Notes:
+    /// - Admin only.
+    /// - Starts governance flow for a new wasm hash.
     fn propose_upgrade(
         e: Env,
         proposal_type: String,
         new_wasm_hash: BytesN<32>,
-    ) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
+    ) -> Result<(), UpgradeError> {
+        authenticate_admin(&e);
         create_upgrade_proposal(&e, proposal_type, &new_wasm_hash)?;
         Ok(())
     }
 
-    /// Adds a governance voter.
+    /// Add governance voter.
     ///
-    /// Authorization:
-    /// - Admin only
-    fn add_voter(e: Env, voter: Address) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
-        upgrade_add_voter(&e, &voter)?;
+    /// Notes:
+    /// - Admin only.
+    fn add_voter(e: Env, voter: Address) {
+        authenticate_admin(&e);
+        upgrade_add_voter(&e, &voter);
 
         events::AddVoterEvent {
             value: voter.clone(),
         }
         .publish(&e);
-
-        Ok(())
     }
 
-    /// Casts an upgrade vote.
+    /// Cast vote on active proposal.
     ///
-    /// Authorization:
-    /// - Voter must authorize
-    fn cast_vote(e: Env, voter: Address, wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+    /// Notes:
+    /// - Voter must authorize.
+    fn cast_vote(e: Env, voter: Address, wasm_hash: BytesN<32>) -> Result<(), UpgradeError> {
         voter.require_auth();
         write_cast_vote(&e, &voter, &wasm_hash)?;
         Ok(())
     }
 
-    /// Cancels the active upgrade proposal.
+    /// Cancel active proposal.
     ///
-    /// Authorization:
-    /// - Admin only
-    fn cancel_proposal(e: Env) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
+    /// Notes:
+    /// - Admin only.
+    fn cancel_proposal(e: Env) -> Result<(), UpgradeError> {
+        authenticate_admin(&e);
         cancel_upgrade_proposal(&e)?;
         Ok(())
     }
 
-    /// Performs a direct contract WASM upgrade.
+    /// Upgrade contract wasm directly.
     ///
-    /// Authorization:
-    /// - Admin only
-    ///
-    /// - This is the most privileged function in the contract.
-    /// - It bypasses proposal execution flow and should be reviewed carefully.
-    /// - If governance-only upgrades are desired, this function may weaken that model.
-    fn upgrade(e: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
+    /// Notes:
+    /// - Admin only.
+    fn upgrade(e: Env, new_wasm_hash: BytesN<32>) {
+        authenticate_admin(&e);
         e.deployer().update_current_contract_wasm(new_wasm_hash);
-        Ok(())
     }
 }

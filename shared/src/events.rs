@@ -38,6 +38,10 @@ pub struct UpdateAdminEvent {
 pub struct AddVoterEvent {
     pub value: Address,
 }
+#[contractevent(topics = ["Remove", "Voter"])]
+pub struct RemoveVoterEvent {
+    pub value: Address,
+}
 #[contractevent(topics = ["Update", "Registry"])]
 pub struct UpdateRegistryEvent {
     pub value: Address,

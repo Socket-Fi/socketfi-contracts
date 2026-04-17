@@ -1,26 +1,36 @@
-use soroban_sdk::{contracttype, Bytes, BytesN, Env, IntoVal, String, Val};
+use soroban_sdk::{contracttype, Bytes, BytesN, Env, String};
 
-use crate::{
-    constants::{DAY_IN_LEDGERS, MAX_LEN},
-    types::SocialPlatform,
-    ContractError,
-};
+use crate::registry_errors::RegistryError;
+use crate::{constants::MAX_LEN, registry_types::SocialPlatform};
 
+/// Storage keys derived from normalized identity inputs.
+///
+/// DESIGN:
+/// - `UseridWalletMap` stores mappings derived from `(platform, user_id)`
+/// - `PasskeyWalletMap` stores mappings derived from raw passkey bytes
+///
+/// IMPORTANT:
+/// - These keys depend on the exact hashing/domain-separation logic below.
+/// - Changing encoding, validation, or domain strings will break compatibility
+///   with existing stored mappings.
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
-    Admin,
     UseridWalletMap(Bytes),
     PasskeyWalletMap(Bytes),
 }
 
+// -----------------------------------------------------------------------------
+// User ID Validation
+// -----------------------------------------------------------------------------
+
 /// Validates a user identity string (`user_id`) used for platform bindings.
 ///
-/// Validation rules:
+/// VALIDATION RULES:
 /// - Must not be empty
 /// - Must not exceed `MAX_LEN`
-/// - Must not contain uppercase ASCII letters (A–Z)
-/// - Must not contain any ASCII whitespace:
+/// - Must not contain uppercase ASCII letters (`A-Z`)
+/// - Must not contain ASCII whitespace:
 ///   - space (32)
 ///   - tab (9)
 ///   - newline (10)
@@ -28,105 +38,111 @@ pub enum DataKey {
 ///   - form feed (12)
 ///   - carriage return (13)
 ///
-/// Design notes:
-/// - Uses raw UTF-8 bytes (`String -> Bytes`) instead of XDR to ensure validation
-///   applies strictly to user input, not serialized metadata.
-/// - Enforces canonical identity representation:
-///   - lowercase-only (ASCII)
-///   - no whitespace
+/// DESIGN:
+/// - Uses raw UTF-8 bytes (`String -> Bytes`) rather than XDR so validation
+///   applies directly to the user input bytes.
+/// - Enforces a canonical representation:
+///   - lowercase ASCII only
+///   - no ASCII whitespace
 ///   - bounded length
 ///
-/// Audit notes:
-/// - This function is a **critical canonicalization layer** and MUST be used:
-///   - before key derivation
-///   - before signature message construction
-///   - before identity comparison
+/// CRITICAL NOTE:
+/// - This function is part of the canonicalization layer and should be applied
+///   consistently before:
+///   - key derivation
+///   - signature message construction
+///   - identity comparison
 ///
-/// - Failure to apply this consistently can lead to:
+/// RISK:
+/// - Inconsistent canonicalization can lead to:
 ///   - mismatched storage keys
 ///   - signature verification failures
-///   - duplicate logical identities (e.g. "Alice" vs "alice")
+///   - duplicate logical identities (for example, `"Alice"` vs `"alice"`)
 ///
-/// - This validator operates on raw UTF-8 bytes:
-///   - Non-ASCII characters are currently allowed unless explicitly restricted
-///   - If strict ASCII-only identities are required, enforce `v <= 127`
+/// UTF-8 NOTE:
+/// - Non-ASCII characters are currently allowed unless restricted elsewhere.
+/// - If strict ASCII-only identities are required, enforce `v <= 127`.
 ///
-/// - Allowing Unicode introduces potential homoglyph risks:
-///   e.g. visually similar characters representing different byte values
+/// SECURITY NOTE:
+/// - Allowing Unicode can introduce homoglyph risks, where visually similar
+///   characters represent different byte values.
 ///
-/// - `MAX_LEN` should be bounded (e.g. <= 128) to avoid gas abuse
-///
-/// - Uses `get_unchecked` for performance:
-///   safe because iteration is strictly bounded by `len`
-pub fn validate_userid(id: String) -> Result<(), ContractError> {
+/// PERFORMANCE:
+/// - Uses `get_unchecked`, which is safe here because iteration is bounded by `len`.
+pub fn validate_userid(id: String) -> Result<(), RegistryError> {
     let id_bytes: Bytes = id.into();
     let len = id_bytes.len();
 
     if len == 0 {
-        return Err(ContractError::InvalidUserId);
+        return Err(RegistryError::InvalidUserId);
     }
 
     if len > MAX_LEN {
-        return Err(ContractError::MaxLengthExceeded);
+        return Err(RegistryError::MaxLengthExceeded);
     }
 
     for i in 0..len {
         let v = id_bytes.get_unchecked(i);
 
         if v >= 65 && v <= 90 {
-            return Err(ContractError::UpperNotAllowed);
+            return Err(RegistryError::UpperNotAllowed);
         }
 
         if matches!(v, 9 | 10 | 11 | 12 | 13 | 32) {
-            return Err(ContractError::SpacesNotAllowed);
+            return Err(RegistryError::SpacesNotAllowed);
         }
     }
 
     Ok(())
 }
 
+// -----------------------------------------------------------------------------
+// (platform, user_id) -> wallet mapping key
+// -----------------------------------------------------------------------------
+
 /// Derives the storage key for a `(platform, user_id) -> wallet` mapping.
 ///
-/// Design notes:
-/// - Platform is normalized via `SocialPlatform::is_platform_supported`
-///   ensuring only supported, canonical platform identifiers are used.
-/// - `user_id` is validated before hashing to enforce canonical encoding.
-/// - Raw bytes are used instead of XDR to avoid serialization artifacts.
-/// - `0x00` separators are used between fields to prevent ambiguity.
-/// - A domain separator (`"userid_wallet"`) isolates this key space.
+/// STRUCTURE:
+///   `hash("userid_wallet" || 0x00 || platform || 0x00 || user_id)`
 ///
-/// Structure:
-///   hash("userid_wallet" || 0x00 || platform || 0x00 || user_id)
+/// DESIGN:
+/// - Platform is normalized through `SocialPlatform::is_platform_supported`
+/// - `user_id` is validated before hashing
+/// - Raw bytes are used instead of XDR
+/// - `0x00` separators are used to prevent concatenation ambiguity
+/// - `"userid_wallet"` provides domain separation for this key namespace
 ///
-/// Audit notes:
-/// - Deterministic key derivation is guaranteed by:
+/// SECURITY:
+/// - Deterministic derivation depends on:
 ///   - strict validation
 ///   - canonical platform normalization
-///   - fixed ordering and separators
+///   - stable ordering and separators
 ///
-/// - `0x00` prevents concatenation ambiguity:
-///   ("ab", "c") ≠ ("a", "bc")
+/// - `0x00` separators prevent ambiguity:
+///   - `("ab", "c")` ≠ `("a", "bc")`
 ///
-/// - Hashing ensures:
-///   - fixed-size storage keys
-///   - no direct exposure of raw identities in keys
+/// - Hashing provides:
+///   - fixed-size derived keys
+///   - no direct exposure of raw identity strings in storage keys
 ///
-/// - Any modification to:
+/// COMPATIBILITY:
+/// - Any change to:
 ///   - validation rules
 ///   - platform normalization
 ///   - field order
-///   will break compatibility with existing stored mappings.
+///   - domain string
+///   will break compatibility with previously stored mappings.
 ///
-/// - This function does NOT enforce rebinding policy.
-///   That is handled at the storage write layer.
+/// NON-GOALS:
+/// - Does not enforce rebinding policy
+/// - Does not enforce replay protection
 ///
-/// - Replay protection is NOT handled here.
-///   Must be enforced at the signature/message layer.
+/// Those must be handled at higher layers.
 pub fn userid_wallet_key(
     e: &Env,
     platform_str: String,
     user_id: String,
-) -> Result<DataKey, ContractError> {
+) -> Result<DataKey, RegistryError> {
     let platform = SocialPlatform::is_platform_supported(platform_str)?;
 
     validate_userid(user_id.clone())?;
@@ -144,20 +160,28 @@ pub fn userid_wallet_key(
     Ok(DataKey::UseridWalletMap(e.crypto().sha256(&salt).into()))
 }
 
+// -----------------------------------------------------------------------------
+// passkey -> wallet mapping key
+// -----------------------------------------------------------------------------
+
 /// Derives the storage key for a `passkey -> wallet` mapping.
 ///
-/// Design notes:
-/// - Uses a distinct domain separator (`"passkey_wallet"`)
-/// - Uses raw passkey bytes (`BytesN<77>`)
+/// STRUCTURE:
+///   `hash("passkey_wallet" || 0x00 || passkey_bytes)`
+///
+/// DESIGN:
+/// - Uses a distinct domain separator: `"passkey_wallet"`
+/// - Uses raw `BytesN<77>` passkey bytes
 /// - Uses `0x00` separator for structured encoding
 ///
-/// Audit notes:
-/// - Ensures no overlap with user_id mapping namespace
-/// - Passkey equality is strict byte equality (no normalization)
-/// - Hashing ensures fixed-size key and avoids raw exposure
+/// SECURITY:
+/// - Ensures this namespace does not overlap with `(platform, user_id)` mappings
+/// - Passkeys use strict byte equality; no normalization is performed
+/// - Hashing provides fixed-size keys and avoids storing raw passkey bytes as keys
 ///
-/// - Any change to encoding logic will break compatibility
-pub fn passkey_wallet_key(e: &Env, passkey: BytesN<77>) -> Result<DataKey, ContractError> {
+/// COMPATIBILITY:
+/// - Any change to encoding or domain separation will break existing mappings.
+pub fn passkey_wallet_key(e: &Env, passkey: BytesN<77>) -> Result<DataKey, RegistryError> {
     let mut salt = Bytes::new(e);
 
     salt.append(&String::from_str(e, "passkey_wallet").into());
@@ -168,11 +192,32 @@ pub fn passkey_wallet_key(e: &Env, passkey: BytesN<77>) -> Result<DataKey, Contr
     Ok(DataKey::PasskeyWalletMap(e.crypto().sha256(&salt).into()))
 }
 
+// -----------------------------------------------------------------------------
+// (platform, user_id) payment key
+// -----------------------------------------------------------------------------
+
+/// Derives a deterministic payment key from `(platform, user_id)`.
+///
+/// STRUCTURE:
+///   `hash("userid_wallet" || 0x00 || platform || 0x00 || user_id)`
+///
+/// NOTE:
+/// - This uses the SAME domain and encoding as `userid_wallet_key`.
+/// - As a result, the returned hash is the same underlying derived identifier
+///   used for `UseridWalletMap`, just returned directly as `BytesN<32>`.
+///
+/// IMPORTANT:
+/// - This is safe if the value is used as an identifier only.
+/// - If a separate namespace is needed in the future, this function would need
+///   its own domain string (for example, `"userid_payment"`).
+///
+/// COMPATIBILITY:
+/// - Changing domain or encoding breaks all previously derived payment keys.
 pub fn userid_payment_key(
     e: &Env,
     platform_str: String,
     user_id: String,
-) -> Result<BytesN<32>, ContractError> {
+) -> Result<BytesN<32>, RegistryError> {
     let platform = SocialPlatform::is_platform_supported(platform_str)?;
 
     validate_userid(user_id.clone())?;
@@ -188,49 +233,4 @@ pub fn userid_payment_key(
     salt.append(&user_id.into());
 
     Ok(e.crypto().sha256(&salt).into())
-}
-
-/// Extends TTL for contract instance storage.
-///
-/// Design notes:
-/// - Keeps contract alive by refreshing TTL close to maximum
-///
-/// Audit notes:
-/// - Must be called in functions relying on long-lived instance state
-/// - Prevents unexpected contract eviction
-/// - Uses buffer (`DAY_IN_LEDGERS`) to avoid edge expiry
-///
-/// - TTL strategy assumes periodic interaction with the contract
-/// - Without interaction, state may still expire
-pub fn bump_instance(e: &Env) {
-    let max_ttl = e.storage().max_ttl();
-
-    e.storage()
-        .instance()
-        .extend_ttl(max_ttl - DAY_IN_LEDGERS, max_ttl);
-}
-
-/// Extends TTL for a persistent storage entry.
-///
-/// Design notes:
-/// - Used for long-lived mappings (e.g. identity registry)
-///
-/// Audit notes:
-/// - Must be called on critical read/write paths
-/// - Prevents silent expiration of mappings
-///
-/// - Failure to bump TTL may cause:
-///   - loss of mappings
-///   - inconsistent system behavior
-///
-/// - Overuse increases cost; apply selectively
-pub fn bump_persistent<K>(e: &Env, key: &K)
-where
-    K: IntoVal<Env, Val>,
-{
-    let max_ttl = e.storage().max_ttl();
-
-    e.storage()
-        .persistent()
-        .extend_ttl(key, max_ttl - DAY_IN_LEDGERS, max_ttl);
 }

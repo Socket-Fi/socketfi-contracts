@@ -1,6 +1,16 @@
-use socketfi_shared::ContractError;
 use soroban_sdk::{contracttype, Address, Bytes, Env};
 
+/// Shared access/config storage keys.
+///
+/// DESIGN:
+/// - Most addresses here are contract-wide configuration and live in instance storage.
+/// - Some identity-related keys are included for compatibility with other modules,
+///   even if they are not read/written directly in this file.
+///
+/// IMPORTANT:
+/// - This file provides low-level storage/auth helpers only.
+/// - It does not enforce higher-level business rules such as uniqueness between
+///   configured addresses or one-time initialization beyond what callers enforce.
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
@@ -14,17 +24,21 @@ pub enum DataKey {
     PasskeyWalletMap(Bytes),
 }
 
+// -----------------------------------------------------------------------------
+// Admin
+// -----------------------------------------------------------------------------
+
 /// Returns `true` if the contract admin has already been initialized.
 ///
-/// Design notes:
+/// DESIGN:
 /// - `Admin` acts as the initialization marker for this contract.
-/// - Used to prevent constructor re-entry / double initialization.
+/// - Commonly used to prevent constructor re-entry / double initialization.
 ///
-/// Audit notes:
-/// - This assumes initialization is atomic:
+/// AUDIT NOTE:
+/// - This assumes initialization is effectively atomic:
 ///   if `Admin` exists, the contract is treated as initialized.
-/// - If future initialization logic becomes multi-step, relying only on `Admin`
-///   as the initialization marker may be insufficient.
+/// - If initialization ever becomes multi-step, relying only on `Admin` as the
+///   initialization marker may become insufficient.
 pub fn has_admin(e: &Env) -> bool {
     let key = DataKey::Admin;
     e.storage().instance().has(&key)
@@ -32,28 +46,25 @@ pub fn has_admin(e: &Env) -> bool {
 
 /// Reads the configured contract admin.
 ///
-/// Returns:
-/// - `Ok(Address)` if admin is set
-/// - `Err(ContractError::AdminNotFound)` if not initialized
+/// RETURNS:
+/// - `Some(Address)` if admin is set
+/// - `None` if admin is not configured
 ///
-/// Audit notes:
-/// - Reads from instance storage, so contract instance TTL must be maintained
-///   to avoid accidental expiration of admin state.
-pub fn read_admin(e: &Env) -> Result<Address, ContractError> {
+/// AUDIT NOTE:
+/// - Reads from instance storage, so instance TTL must be maintained if the
+///   contract is expected to remain usable long-term.
+pub fn read_admin(e: &Env) -> Option<Address> {
     let key = DataKey::Admin;
-    e.storage()
-        .instance()
-        .get(&key)
-        .ok_or(ContractError::AdminNotFound)
+    e.storage().instance().get(&key)
 }
 
 /// Writes the contract admin to instance storage.
 ///
-/// Design notes:
+/// DESIGN:
 /// - Low-level storage helper only.
 /// - Does not perform authorization checks.
 ///
-/// Audit notes:
+/// AUDIT NOTE:
 /// - Must only be called from trusted flows such as:
 ///   - constructor
 ///   - authenticated admin update paths
@@ -65,117 +76,142 @@ pub fn write_admin(e: &Env, admin: &Address) {
 
 /// Requires authorization from the currently configured admin.
 ///
-/// Returns:
-/// - `Ok(())` if the stored admin successfully authorizes
-/// - `Err(ContractError::AdminNotFound)` if admin is not configured
+/// BEHAVIOR:
+/// - Reads the stored admin
+/// - Calls `require_auth()` on that address
 ///
-/// Audit notes:
+/// IMPORTANT:
+/// - This function does NOT return `Result`.
+/// - It will panic if admin is not configured because it uses `unwrap()`.
+///
+/// AUDIT NOTE:
 /// - Security depends on `read_admin` returning the correct stored admin.
 /// - This function does not bump TTL; callers should ensure instance TTL is
 ///   maintained elsewhere for long-lived contract configuration.
-pub fn authenticate_admin(e: &Env) -> Result<(), ContractError> {
-    let admin = read_admin(e)?;
+pub fn authenticate_admin(e: &Env) {
+    let admin = read_admin(e).unwrap();
     admin.require_auth();
-
-    Ok(())
 }
+
+// -----------------------------------------------------------------------------
+// Factory
+// -----------------------------------------------------------------------------
 
 /// Reads the configured factory contract address.
 ///
-/// Returns:
-/// - `Ok(Address)` if factory is set
-/// - `Err(ContractError::FactoryNotFound)` otherwise
+/// RETURNS:
+/// - `Some(Address)` if factory is set
+/// - `None` otherwise
 ///
-/// Audit notes:
+/// AUDIT NOTE:
 /// - Reads from instance storage; instance TTL must be maintained.
-pub fn read_factory(e: &Env) -> Result<Address, ContractError> {
+pub fn read_factory(e: &Env) -> Option<Address> {
     let key = DataKey::Factory;
-    e.storage()
-        .instance()
-        .get(&key)
-        .ok_or(ContractError::FactoryNotFound)
+    e.storage().instance().get(&key)
 }
 
 /// Writes the configured factory contract address.
 ///
-/// Design notes:
+/// DESIGN:
 /// - Low-level storage helper only.
 /// - Does not perform authorization checks.
 ///
-/// Audit notes:
+/// AUDIT NOTE:
 /// - Must only be called from trusted/admin-controlled flows.
 /// - No business-rule validation is enforced here
-///   (e.g. whether factory equals another configured address).
+///   (for example, whether factory equals another configured address).
 pub fn write_factory(e: &Env, factory: &Address) {
     let key = DataKey::Factory;
     e.storage().instance().set(&key, factory);
 }
 
-/// Reads the configured social_payments contract address.
+// -----------------------------------------------------------------------------
+// Social Payments
+// -----------------------------------------------------------------------------
+
+/// Reads the configured social payments contract address.
 ///
-/// Returns:
-/// - `Ok(Address)` if social_payments is set
-/// - `Err(ContractError::SocialPaymentsNotFound)` otherwise
+/// RETURNS:
+/// - `Some(Address)` if social payments is set
+/// - `None` otherwise
 ///
-/// Audit notes:
+/// AUDIT NOTE:
 /// - Reads from instance storage; instance TTL must be maintained.
-pub fn read_social_payments(e: &Env) -> Result<Address, ContractError> {
+pub fn read_social_router(e: &Env) -> Option<Address> {
     let key = DataKey::SocialPayments;
-    e.storage()
-        .instance()
-        .get(&key)
-        .ok_or(ContractError::SocialPayNotFound)
+    e.storage().instance().get(&key)
 }
 
-/// Writes the configured social_payments contract address.
+/// Writes the configured social payments contract address.
 ///
-/// Design notes:
+/// DESIGN:
 /// - Low-level storage helper only.
 /// - Does not perform authorization checks.
 ///
-/// Audit notes:
+/// AUDIT NOTE:
 /// - Must only be called from trusted/admin-controlled flows.
 /// - No business-rule validation is enforced here
-///   (e.g. uniqueness vs admin/factory or other address constraints).
-pub fn write_social_payments(e: &Env, social_payment: &Address) {
+///   (for example, uniqueness vs admin/factory or other address constraints).
+pub fn write_social_router(e: &Env, social_router: &Address) {
     let key = DataKey::SocialPayments;
-    e.storage().instance().set(&key, social_payment);
+    e.storage().instance().set(&key, social_router);
 }
 
-/// Reads the configured registry contract address.
-pub fn read_registry(e: &Env) -> Result<Address, ContractError> {
-    let key = DataKey::Registry;
+// -----------------------------------------------------------------------------
+// Registry
+// -----------------------------------------------------------------------------
 
-    e.storage()
-        .instance()
-        .get(&key)
-        .ok_or(ContractError::RegistryNotFound)
+/// Reads the configured registry contract address.
+///
+/// RETURNS:
+/// - `Some(Address)` if registry is set
+/// - `None` otherwise
+///
+/// AUDIT NOTE:
+/// - Reads from instance storage; instance TTL must be maintained.
+pub fn read_registry(e: &Env) -> Option<Address> {
+    let key = DataKey::Registry;
+    e.storage().instance().get(&key)
 }
 
 /// Writes the registry contract address to instance storage.
 ///
-/// Audit note:
-/// - caller must enforce authorization where required
+/// DESIGN:
+/// - Low-level storage helper only.
+/// - Does not perform authorization checks.
+///
+/// AUDIT NOTE:
+/// - Caller must enforce authorization where required.
 pub fn write_registry(e: &Env, registry: &Address) {
     let key = DataKey::Registry;
     e.storage().instance().set(&key, registry);
 }
 
+// -----------------------------------------------------------------------------
+// Fee Manager
+// -----------------------------------------------------------------------------
 
 /// Reads the configured fee manager contract address.
-pub fn read_fee_manager(e: &Env) -> Result<Address, ContractError> {
+///
+/// RETURNS:
+/// - `Some(Address)` if fee manager is set
+/// - `None` otherwise
+///
+/// AUDIT NOTE:
+/// - Reads from instance storage; instance TTL must be maintained.
+pub fn read_fee_manager(e: &Env) -> Option<Address> {
     let key = DataKey::FeeManager;
-
-    e.storage()
-        .instance()
-        .get(&key)
-        .ok_or(ContractError::FeeManagerNotFound)
+    e.storage().instance().get(&key)
 }
 
 /// Writes the fee manager contract address to instance storage.
 ///
-/// Audit note:
-/// - caller must enforce authorization where required
+/// DESIGN:
+/// - Low-level storage helper only.
+/// - Does not perform authorization checks.
+///
+/// AUDIT NOTE:
+/// - Caller must enforce authorization where required.
 pub fn write_fee_manager(e: &Env, fee_manager: &Address) {
     let key = DataKey::FeeManager;
     e.storage().instance().set(&key, fee_manager);

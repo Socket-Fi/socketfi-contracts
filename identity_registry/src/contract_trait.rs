@@ -1,87 +1,125 @@
 use soroban_sdk::{Address, BytesN, Env, String, Vec};
 
-use socketfi_shared::{types::ValidatorSignature, ContractError};
+use socketfi_shared::{registry_errors::RegistryError, registry_types::ValidatorSignature};
+use upgrade::errors::UpgradeError;
 
+/// Public interface for the identity registry contract.
+///
+/// Notes:
+/// - Covers identity binding, passkey/user mapping, validator management,
+///   admin control, and upgrade governance.
 pub trait RegistryTrait {
-    // ---------------------------------------------------------------------
-    // Initialization
-    // ---------------------------------------------------------------------
+    // initialization
 
-    fn __constructor(
-        e: Env,
-        admin: Address,
-        factory: Address,
-        social_payments: Address,
-    ) -> Result<(), ContractError>;
+    /// Initialize registry state.
+    ///
+    /// Notes:
+    /// - Sets the initial admin.
+    /// - Intended to run once.
+    fn __constructor(e: Env, admin: Address) -> Result<(), UpgradeError>;
 
-    // ---------------------------------------------------------------------
-    // Identity Core
-    // ---------------------------------------------------------------------
+    // identity core
 
+    /// Verify identity binding and store the wallet mapping.
+    ///
+    /// Notes:
+    /// - Verifies validator signatures for the provided identity payload.
+    /// - Binds wallet to `(platform, user_id)` after successful verification.
     fn verify_identity_binding(
         e: Env,
         wallet: Address,
         user_id: String,
         platform_str: String,
         signatures: Vec<ValidatorSignature>,
-    ) -> Result<(), ContractError>;
+    ) -> Result<(), RegistryError>;
 
+    /// Store passkey-to-wallet mapping.
+    ///
+    /// Notes:
+    /// - Used to resolve wallet by passkey.
     fn set_passkey_wallet_map(
         e: Env,
         passkey: BytesN<77>,
         wallet: Address,
-    ) -> Result<(), ContractError>;
+    ) -> Result<(), RegistryError>;
 
-    // ---------------------------------------------------------------------
-    // Validator Management
-    // ---------------------------------------------------------------------
+    // validator management
 
-    fn add_validator(e: Env, validator: BytesN<32>) -> Result<(), ContractError>;
+    /// Add a validator public key.
+    ///
+    /// Notes:
+    /// - Expands the set of valid identity signers.
+    fn add_validator(e: Env, validator: BytesN<32>);
 
-    fn remove_validator(e: Env, validator: BytesN<32>) -> Result<(), ContractError>;
+    /// Remove a validator public key.
+    ///
+    /// Notes:
+    /// - Revokes validator approval for future checks.
+    fn remove_validator(e: Env, validator: BytesN<32>);
 
-    fn get_validators(e: Env) -> Result<Vec<BytesN<32>>, ContractError>;
+    /// Return all configured validators.
+    fn get_validators(e: Env) -> Vec<BytesN<32>>;
 
-    // ---------------------------------------------------------------------
-    // Read APIs
-    // ---------------------------------------------------------------------
+    // read APIs
 
+    /// Resolve wallet by `(platform, user_id)`.
+    ///
+    /// Notes:
+    /// - Returns `None` when no mapping exists.
     fn get_wallet_by_userid(
         e: Env,
         platform: String,
         user_id: String,
-    ) -> Result<Option<Address>, ContractError>;
+    ) -> Result<Option<Address>, RegistryError>;
 
+    /// Resolve wallet by passkey.
+    ///
+    /// Notes:
+    /// - Returns `None` when no mapping exists.
     fn get_wallet_by_passkey(e: Env, passkey: BytesN<77>)
-        -> Result<Option<Address>, ContractError>;
+        -> Result<Option<Address>, RegistryError>;
 
-    fn get_factory(e: Env) -> Result<Address, ContractError>;
+    // admin/config
 
-    fn get_social_payments(e: Env) -> Result<Address, ContractError>;
+    /// Update admin.
+    ///
+    /// Notes:
+    /// - Changes control over privileged registry actions.
+    fn set_admin(e: Env, new_admin: Address);
 
-    // ---------------------------------------------------------------------
-    // Admin / Config
-    // ---------------------------------------------------------------------
+    // upgrade governance
 
-    fn set_admin(e: Env, new_admin: Address) -> Result<(), ContractError>;
+    /// Execute approved upgrade proposal.
+    ///
+    /// Notes:
+    /// - Applies the current passed proposal.
+    fn apply_upgrade(e: Env) -> Result<BytesN<32>, UpgradeError>;
 
-    // ---------------------------------------------------------------------
-    // Upgrade Governance
-    // ---------------------------------------------------------------------
-
-    fn apply_upgrade(e: Env) -> Result<BytesN<32>, ContractError>;
-
+    /// Create upgrade proposal.
+    ///
+    /// Notes:
+    /// - Starts governance flow for a new wasm hash.
     fn propose_upgrade(
         e: Env,
         proposal_type: String,
         new_wasm_hash: BytesN<32>,
-    ) -> Result<(), ContractError>;
+    ) -> Result<(), UpgradeError>;
 
-    fn add_voter(e: Env, voter: Address) -> Result<(), ContractError>;
+    /// Add governance voter.
+    fn add_voter(e: Env, voter: Address);
 
-    fn cast_vote(e: Env, voter: Address, wasm_hash: BytesN<32>) -> Result<(), ContractError>;
+    /// Remove governance voter.
+    fn remove_voter(e: Env, voter: Address);
 
-    fn cancel_proposal(e: Env) -> Result<(), ContractError>;
+    /// Cast vote on active proposal.
+    ///
+    /// Notes:
+    /// - Records voter approval for the supplied hash.
+    fn cast_vote(e: Env, voter: Address, wasm_hash: BytesN<32>) -> Result<(), UpgradeError>;
 
-    fn upgrade(e: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError>;
+    /// Cancel active proposal.
+    fn cancel_proposal(e: Env) -> Result<(), UpgradeError>;
+
+    /// Upgrade contract wasm directly.
+    fn upgrade(e: Env, new_wasm_hash: BytesN<32>);
 }

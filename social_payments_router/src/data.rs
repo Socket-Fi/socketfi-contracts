@@ -1,10 +1,4 @@
 use soroban_sdk::{contracttype, Address, BytesN, String};
-
-/// Result of a payment attempt.
-///
-/// Notes:
-/// - `Direct` means funds were immediately transferred to a resolved wallet.
-/// - `Pending` means funds are escrowed and require a later claim.
 #[derive(Clone)]
 #[contracttype]
 pub enum PaymentResult {
@@ -42,16 +36,10 @@ pub enum PaymentStatus {
 #[contracttype]
 pub enum DataKey {
     Admin,
-    /// Mapping: identity_hash -> Vec<payment_id>
     IdentityPayments(BytesN<32>),
-    /// Mapping: sender -> Vec<payment_id>
     SenderPayments(Address),
-    /// Validator set: Map<BytesN<32>, ()>
     Validators,
-    /// Global payment nonce (monotonic counter)
     PaymentNonce,
-    /// Mapping: payment_id -> PendingPayment
     Payment(BytesN<32>),
-    /// Supported asset set
     SupportedTokens,
 }

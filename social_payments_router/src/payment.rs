@@ -1,14 +1,28 @@
 use socketfi_access::access::read_registry;
-use socketfi_shared::{tokens::send_asset, utils::userid_payment_key, ContractError};
+use socketfi_shared::{
+    registry_errors::RegistryError, tokens::send_asset, utils::userid_payment_key,
+};
 use soroban_sdk::{xdr::ToXdr, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
 
 use crate::data::{DataKey, PaymentStatus, PendingPayment};
 
+/// Get current ledger timestamp.
+///
+/// Notes:
+/// - Used for payment expiry checks.
 pub fn now(e: &Env) -> u64 {
     e.ledger().timestamp()
 }
 
 /// Deterministic payment id generator.
+///
+/// Notes:
+/// - Combines sender, asset, identity, and nonce into hash.
+/// - Ensures stable id for identical inputs.
+///
+/// Audit:
+/// - Uniqueness depends on nonce monotonicity.
+/// - Any reuse of nonce may cause id collision.
 pub fn generate_payment_id(
     e: &Env,
     sender: Address,
@@ -30,30 +44,44 @@ pub fn generate_payment_id(
     e.crypto().sha256(&data).into()
 }
 
-pub fn write_payment(
-    e: &Env,
-    payment_id: &BytesN<32>,
-    payment: &PendingPayment,
-) -> Result<(), ContractError> {
+/// Store payment state.
+///
+/// Notes:
+/// - Overwrites existing entry if present.
+///
+/// Audit:
+/// - Caller must ensure correct state transitions (no overwrite of finalized states).
+pub fn write_payment(e: &Env, payment_id: &BytesN<32>, payment: &PendingPayment) {
     e.storage()
         .persistent()
         .set(&DataKey::Payment(payment_id.clone()), &payment);
-    Ok(())
 }
 
-pub fn read_payment(e: &Env, payment_id: &BytesN<32>) -> Result<PendingPayment, ContractError> {
+/// Read payment by id.
+///
+/// Returns:
+/// - `Some(PendingPayment)` if exists
+/// - `None` if missing
+pub fn read_payment(e: &Env, payment_id: &BytesN<32>) -> Option<PendingPayment> {
     e.storage()
         .persistent()
         .get(&DataKey::Payment(payment_id.clone()))
-        .ok_or(ContractError::PaymentNotFound)
 }
 
+/// Append payment id to identity index.
+///
+/// Notes:
+/// - Maintains `(platform, user_id) -> [payment_ids]` index.
+///
+/// Audit:
+/// - Unbounded vector growth possible.
+/// - No deduplication; assumes ids are unique.
 pub fn append_identity_payment(
     e: &Env,
     platform: String,
     user_id: String,
     payment_id: BytesN<32>,
-) -> Result<(), ContractError> {
+) -> Result<(), RegistryError> {
     let id_key = userid_payment_key(e, platform, user_id)?;
     let storage_key = DataKey::IdentityPayments(id_key);
 
@@ -69,11 +97,15 @@ pub fn append_identity_payment(
     Ok(())
 }
 
-pub fn append_sender_payment(
-    e: &Env,
-    from: Address,
-    payment_id: BytesN<32>,
-) -> Result<(), ContractError> {
+/// Append payment id to sender index.
+///
+/// Notes:
+/// - Maintains `sender -> [payment_ids]` index.
+///
+/// Audit:
+/// - Unbounded growth possible.
+/// - No pruning of old or completed payments.
+pub fn append_sender_payment(e: &Env, from: Address, payment_id: BytesN<32>) {
     let storage_key = DataKey::SenderPayments(from);
 
     let mut ids = e
@@ -84,20 +116,28 @@ pub fn append_sender_payment(
 
     ids.push_back(payment_id);
     e.storage().persistent().set(&storage_key, &ids);
-
-    Ok(())
 }
 
-/// Claims a pending payment.
-pub fn claim_one(e: &Env, claimer: &Address, payment_id: &BytesN<32>) -> Result<(), ContractError> {
-    let mut payment = read_payment(e, payment_id)?;
+/// Claim a pending payment.
+///
+/// Notes:
+/// - Requires payment to be pending and not expired.
+/// - Resolves identity via registry before claim.
+/// - Transfers funds to claimer on success.
+///
+/// Audit:
+/// - Relies on external registry for identity resolution.
+/// - Uses `unwrap()` on storage read → assumes payment exists.
+/// - State is updated before transfer to prevent reentrancy issues.
+pub fn claim_one(e: &Env, claimer: &Address, payment_id: &BytesN<32>) -> Result<(), RegistryError> {
+    let mut payment = read_payment(e, payment_id).unwrap();
 
     if !matches!(payment.status, PaymentStatus::Pending) {
-        return Err(ContractError::PaymentNotClaimable);
+        return Err(RegistryError::NotClaimable);
     }
 
     if now(e) >= payment.expires_at {
-        return Err(ContractError::PaymentExpired);
+        return Err(RegistryError::Expired);
     }
 
     let args: Vec<Val> = Vec::from_array(
@@ -109,53 +149,69 @@ pub fn claim_one(e: &Env, claimer: &Address, payment_id: &BytesN<32>) -> Result<
     );
 
     let resolved: Option<Address> = e.invoke_contract(
-        &read_registry(e)?,
+        &read_registry(e).unwrap(),
         &Symbol::new(e, "get_wallet_by_userid"),
         args,
     );
 
     if resolved != Some(claimer.clone()) {
-        return Err(ContractError::UnauthorizedClaim);
+        return Err(RegistryError::Unauthorized);
     }
 
     payment.status = PaymentStatus::Claimed;
     payment.claimed_by = Some(claimer.clone());
-    write_payment(e, payment_id, &payment)?;
+    write_payment(e, payment_id, &payment);
 
     send_asset(e, claimer, &payment.asset, payment.amount);
-
     Ok(())
 }
 
-/// Refunds an expired pending payment.
-pub fn refund_one(e: &Env, sender: &Address, payment_id: &BytesN<32>) -> Result<(), ContractError> {
-    let mut payment = read_payment(e, payment_id)?;
+/// Refund an expired pending payment.
+///
+/// Notes:
+/// - Requires sender auth.
+/// - Only valid after expiry.
+/// - Transfers funds back to sender.
+///
+/// Audit:
+/// - Uses `unwrap()` → assumes payment exists.
+/// - Expiry check enforces claim/refund exclusivity.
+/// - State updated before transfer.
+pub fn refund_one(e: &Env, sender: &Address, payment_id: &BytesN<32>) -> Result<(), RegistryError> {
+    let mut payment = read_payment(e, payment_id).unwrap();
 
     if !matches!(payment.status, PaymentStatus::Pending) {
-        return Err(ContractError::PaymentNotRefundable);
+        return Err(RegistryError::NotRefundable);
     }
 
     if payment.sender != *sender {
-        return Err(ContractError::NotPaymentSender);
+        return Err(RegistryError::Unauthorized);
     }
 
     if now(e) < payment.expires_at {
-        return Err(ContractError::PaymentNotExpired);
+        return Err(RegistryError::Expired);
     }
 
     payment.status = PaymentStatus::Refunded;
-    write_payment(e, payment_id, &payment)?;
+    write_payment(e, payment_id, &payment);
 
     send_asset(e, sender, &payment.asset, payment.amount);
 
     Ok(())
 }
 
+/// Read payment ids for identity.
+///
+/// Notes:
+/// - Returns empty vector if none found.
+///
+/// Audit:
+/// - No filtering of expired or processed payments.
 pub fn read_identity_payment_ids(
     e: &Env,
     platform: String,
     user_id: String,
-) -> Result<Vec<BytesN<32>>, ContractError> {
+) -> Result<Vec<BytesN<32>>, RegistryError> {
     let id_key = userid_payment_key(e, platform, user_id)?;
     let storage_key = DataKey::IdentityPayments(id_key);
 
@@ -165,11 +221,15 @@ pub fn read_identity_payment_ids(
         .unwrap_or_else(|| Vec::new(e)))
 }
 
-pub fn read_sender_payment_ids(e: &Env, sender: Address) -> Result<Vec<BytesN<32>>, ContractError> {
+/// Read payment ids for sender.
+///
+/// Notes:
+/// - Returns empty vector if none found.
+pub fn read_sender_payment_ids(e: &Env, sender: Address) -> Vec<BytesN<32>> {
     let storage_key = DataKey::SenderPayments(sender);
 
-    Ok(e.storage()
+    e.storage()
         .persistent()
         .get::<_, Vec<BytesN<32>>>(&storage_key)
-        .unwrap_or_else(|| Vec::new(e)))
+        .unwrap_or_else(|| Vec::new(e))
 }

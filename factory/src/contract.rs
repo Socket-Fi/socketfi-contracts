@@ -1,94 +1,81 @@
 use crate::{contract_trait::FactoryTrait, wallet_factory::write_create_wallet};
-use socketfi_shared::{events, ContractError};
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
-use upgrade::{
-    cancel_upgrade_proposal, create_upgrade_proposal, execute_upgrade,
-    get_wallet_version as read_wallet_version, init_wallet_version, upgrade_add_voter,
-    write_cast_vote,
-};
-
 use socketfi_access::access::{
     authenticate_admin, has_admin, read_admin, read_fee_manager, read_registry, write_admin,
-    write_fee_manager, write_registry,
+    write_fee_manager, write_registry, write_social_router,
+};
+use socketfi_shared::events;
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
+use upgrade::{
+    cancel_upgrade_proposal, create_upgrade_proposal, errors::UpgradeError, execute_upgrade,
+    get_wallet_version as read_wallet_version, init_wallet_version, upgrade_add_voter,
+    upgrade_remove_voter, write_cast_vote,
 };
 
-/// Factory contract responsible for:
-/// - creating wallet instances
-/// - storing core dependency contract addresses
-/// - exposing upgrade governance entrypoints
+/// Factory contract for wallet deployment and wallet-version governance.
 ///
-/// Security model:
-/// - admin controls system configuration and governance administration
-/// - approved voters participate in upgrade voting
-/// - wallet creation is public unless restricted in downstream logic
+/// Notes:
+/// - Stores shared dependencies used when deploying new wallets.
+/// - Exposes admin-controlled configuration updates.
+/// - Exposes governance actions for wallet version / upgrade flow.
 #[contract]
 pub struct FactoryContract;
 
 #[contractimpl]
 impl FactoryTrait for FactoryContract {
-    // ---------------------------------------------------------------------
-    // Initialization
-    // ---------------------------------------------------------------------
+    // initialization
 
-    /// Initializes the factory contract.
+    /// Initialize the factory and its core dependencies.
     ///
-    /// Sets:
-    /// - admin address
-    /// - registry contract address
-    /// - fee manager contract address
-    /// - initial wallet version hash
+    /// Auth:
+    /// - Intended to run once during contract setup.
     ///
-    /// Also adds the initial admin as an upgrade voter.
+    /// Effects:
+    /// - Stores admin and dependency contract addresses.
+    /// - Stores the initial approved wallet wasm hash.
+    /// - Adds the initial admin as a governance voter.
     ///
-    /// Security:
-    /// - must only be executed once
-    /// - re-initialization is blocked by `has_admin` (not necessary but left after upgraded to __constructor)
+    /// Notes:
+    /// - Re-initialization is blocked once admin state exists.
+    /// - New wallets deployed after this point inherit the configured dependencies.
     fn __constructor(
         e: Env,
         admin: Address,
         registry: Address,
+        social_router: Address,
         fee_manager: Address,
         wasm: BytesN<32>,
-    ) -> Result<(), ContractError> {
+    ) -> Result<(), UpgradeError> {
         if has_admin(&e) {
-            return Err(ContractError::AlreadyInitialized);
+            return Err(UpgradeError::AlreadyInitialized);
         }
 
         write_admin(&e, &admin);
         write_registry(&e, &registry);
+        write_social_router(&e, &social_router);
         write_fee_manager(&e, &fee_manager);
 
-        // Store the initial approved wallet version.
+        // Store the initial wallet version approved for deployment.
         init_wallet_version(&e, &wasm)?;
 
         // Bootstrap governance by allowing the initial admin to vote.
-        upgrade_add_voter(&e, &admin)?;
+        upgrade_add_voter(&e, &admin);
 
         Ok(())
     }
 
-    // ---------------------------------------------------------------------
-    // Wallet creation
-    // ---------------------------------------------------------------------
+    // wallet creation
 
-    /// Creates a new wallet instance using the currently configured wallet logic.
+    /// Deploy and initialize a new wallet instance.
     ///
-    /// Parameters:
-    /// - `passkey`: wallet passkey material / identifier
-    /// - `bls_keys`: additional BLS public keys to attach to the wallet
-    ///
-    /// Emits:
-    /// - `WalletCreationEvent`
-    ///
-    /// Audit note:
-    /// - wallet creation is currently permissionless from this contract layer
-    /// - any constraints on who may create wallets must be enforced inside
-    ///   `write_create_wallet` or downstream wallet initialization logic
+    /// Effects:
+    /// - Creates a new wallet using the currently approved wallet version.
+    /// - Passes wallet auth material into the deployment flow.
+    /// - Emits a wallet creation event after successful deployment.
     fn create_wallet(
         e: Env,
         passkey: BytesN<77>,
         bls_keys: Vec<BytesN<96>>,
-    ) -> Result<Address, ContractError> {
+    ) -> Result<Address, UpgradeError> {
         let wallet_address = write_create_wallet(&e, &passkey, bls_keys)?;
 
         events::WalletCreationEvent {
@@ -99,188 +86,183 @@ impl FactoryTrait for FactoryContract {
         Ok(wallet_address)
     }
 
-    // ---------------------------------------------------------------------
-    // Read-only getters
-    // ---------------------------------------------------------------------
+    // read-only getters
 
-    /// Returns the currently approved wallet version hash.
-    fn get_wallet_version(e: Env) -> Result<BytesN<32>, ContractError> {
+    /// Return the currently approved wallet version hash.
+    ///
+    /// Notes:
+    /// - Read-only helper used to inspect deployment version state.
+    fn get_wallet_version(e: Env) -> Option<BytesN<32>> {
         read_wallet_version(&e)
     }
 
-    /// Returns the current admin address.
-    fn get_admin(e: Env) -> Result<Address, ContractError> {
+    /// Return the current admin address.
+    ///
+    /// Notes:
+    /// - Read-only helper for configuration inspection.
+    fn get_admin(e: Env) -> Option<Address> {
         read_admin(&e)
     }
 
-    /// Returns the configured identity/registry contract address.
-    fn get_registry(e: Env) -> Result<Address, ContractError> {
+    /// Return the configured registry contract address.
+    ///
+    /// Notes:
+    /// - Read-only helper for dependency inspection.
+    fn get_registry(e: Env) -> Option<Address> {
         read_registry(&e)
     }
 
-    /// Returns the configured fee manager contract address.
-    fn get_fee_manager(e: Env) -> Result<Address, ContractError> {
+    /// Return the configured fee manager contract address.
+    ///
+    /// Notes:
+    /// - Read-only helper for dependency inspection.
+    fn get_fee_manager(e: Env) -> Option<Address> {
         read_fee_manager(&e)
     }
 
-    // ---------------------------------------------------------------------
-    // Admin configuration updates
-    // ---------------------------------------------------------------------
+    // admin configuration updates
 
-    /// Updates the admin address.
+    /// Update the factory admin address.
     ///
-    /// Security:
-    /// - current admin authorization required
+    /// Auth:
+    /// - Current admin authorization required.
     ///
-    /// Emits:
-    /// - `UpdateAdminEvent`
-    ///
-    /// Audit note:
-    /// - consider whether rotating admin should also rotate governance voter
-    ///   membership automatically, depending on intended governance model
-    fn update_admin(e: Env, new_admin: Address) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
+    /// Effects:
+    /// - Replaces the account that controls privileged factory actions.
+    /// - Emits an admin update event.
+    fn update_admin(e: Env, new_admin: Address) {
+        authenticate_admin(&e);
         write_admin(&e, &new_admin);
 
         events::UpdateAdminEvent {
             value: new_admin.clone(),
         }
         .publish(&e);
-
-        Ok(())
     }
 
-    /// Updates the registry contract address.
+    /// Update the registry dependency used by the factory.
     ///
-    /// Security:
-    /// - admin only
+    /// Auth:
+    /// - Admin only.
     ///
-    /// Emits:
-    /// - `UpdateRegistryEvent`
-    fn update_registry(e: Env, registry: Address) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
+    /// Effects:
+    /// - Replaces the registry address used for future wallet deployments.
+    /// - Emits a registry update event.
+    fn update_registry(e: Env, registry: Address) {
+        authenticate_admin(&e);
         write_registry(&e, &registry);
 
         events::UpdateRegistryEvent {
             value: registry.clone(),
         }
         .publish(&e);
-
-        Ok(())
     }
 
-    /// Updates the fee manager contract address.
+    /// Update the fee manager dependency used by the factory.
     ///
-    /// Security:
-    /// - admin only
+    /// Auth:
+    /// - Admin only.
     ///
-    /// Emits:
-    /// - `UpdateFeeManagerEvent`
-    fn update_fee_manager(e: Env, fee_manager: Address) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
+    /// Effects:
+    /// - Replaces the fee manager address used for future wallet deployments.
+    /// - Emits a fee manager update event.
+    fn update_fee_manager(e: Env, fee_manager: Address) {
+        authenticate_admin(&e);
         write_fee_manager(&e, &fee_manager);
 
         events::UpdateFeeManagerEvent {
             value: fee_manager.clone(),
         }
         .publish(&e);
-
-        Ok(())
     }
 
-    // ---------------------------------------------------------------------
-    // Upgrade governance
-    // ---------------------------------------------------------------------
+    // upgrade governance
 
-    /// Applies a completed upgrade proposal after voting has ended and passed.
+    /// Execute a passed upgrade proposal.
     ///
-    /// Security:
-    /// - admin authorization required to trigger execution
+    /// Auth:
+    /// - Admin authorization required to trigger execution.
     ///
-    /// Returns:
-    /// - the approved WASM hash that was applied or recorded
-    ///
-    /// Audit note:
-    /// - actual voting/deadline/pass checks are enforced in `execute_upgrade`
-    fn apply_upgrade(e: Env) -> Result<BytesN<32>, ContractError> {
-        authenticate_admin(&e)?;
+    /// Effects:
+    /// - Applies the approved governance outcome.
+    /// - Returns the wasm hash that was applied or activated.
+    fn apply_upgrade(e: Env) -> Result<BytesN<32>, UpgradeError> {
+        authenticate_admin(&e);
         execute_upgrade(&e)
     }
 
-    /// Creates a new upgrade proposal.
+    /// Create a new upgrade proposal.
     ///
-    /// Parameters:
-    /// - `proposal_type`: proposal category, e.g. contract upgrade or wallet version update
-    /// - `new_wasm_hash`: target WASM hash under consideration
+    /// Auth:
+    /// - Admin only.
     ///
-    /// Security:
-    /// - admin only
-    ///
-    /// Audit note:
-    /// - `proposal_type` is a `String`, which is flexible but weaker than an enum.
-    ///   If possible, prefer a strongly typed enum for safer validation.
+    /// Effects:
+    /// - Starts a new proposal for upgrade governance.
+    /// - Stores the proposed target hash for voting/execution flow.
     fn propose_upgrade(
         e: Env,
         proposal_type: String,
         new_wasm_hash: BytesN<32>,
-    ) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
+    ) -> Result<(), UpgradeError> {
+        authenticate_admin(&e);
         create_upgrade_proposal(&e, proposal_type, &new_wasm_hash)?;
         Ok(())
     }
 
-    /// Adds a new authorized voter for upgrade governance.
+    /// Add a voter to the governance voter set.
     ///
-    /// Security:
-    /// - admin only
+    /// Auth:
+    /// - Admin only.
     ///
-    /// Emits:
-    /// - `AddVoterEvent`
-    ///
-    /// Audit note:
-    /// - ensure downstream voter storage prevents duplicate voter insertion
-    fn add_voter(e: Env, voter: Address) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
-        upgrade_add_voter(&e, &voter)?;
+    /// Effects:
+    /// - Grants the address voting rights for future proposals.
+    /// - Emits a voter-added event.
+    fn add_voter(e: Env, voter: Address) {
+        authenticate_admin(&e);
+        upgrade_add_voter(&e, &voter);
 
         events::AddVoterEvent {
             value: voter.clone(),
         }
         .publish(&e);
-
-        Ok(())
     }
 
-    /// Casts a vote for the currently active upgrade proposal.
+    /// Remove a voter from the governance voter set.
     ///
-    /// Parameters:
-    /// - `voter`: voter address casting the vote
-    /// - `wasm_hash`: the proposal hash the voter is approving
+    /// Auth:
+    /// - Admin only.
+    fn remove_voter(e: Env, voter: Address) {
+        authenticate_admin(&e);
+        upgrade_remove_voter(&e, &voter);
+
+        events::RemoveVoterEvent {
+            value: voter.clone(),
+        }
+        .publish(&e);
+    }
+
+    /// Cast a vote for the currently active proposal.
     ///
-    /// Security:
-    /// - voter authorization required
+    /// Auth:
+    /// - The provided voter address must authorize the call.
     ///
-    /// Audit note:
-    /// - if `write_cast_vote` already calls `require_auth`, the explicit auth
-    ///   check here is redundant but harmless
-    /// - only approved voters should succeed; that validation is expected
-    ///   inside `write_cast_vote`
-    fn cast_vote(e: Env, voter: Address, wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+    /// Effects:
+    /// - Records the voter’s approval for the supplied proposal hash.
+    fn cast_vote(e: Env, voter: Address, wasm_hash: BytesN<32>) -> Result<(), UpgradeError> {
         voter.require_auth();
         write_cast_vote(&e, &voter, &wasm_hash)?;
         Ok(())
     }
 
-    /// Cancels the currently active upgrade proposal.
+    /// Cancel the currently active proposal.
     ///
-    /// Security:
-    /// - admin only
+    /// Auth:
+    /// - Admin only.
     ///
-    /// Audit note:
-    /// - helper is expected to clear all pending proposal state safely
-    /// - consider emitting a cancel event in the upgrade module if not already done
-    fn cancel_proposal(e: Env) -> Result<(), ContractError> {
-        authenticate_admin(&e)?;
+    /// Effects:
+    /// - Clears the active proposal state before execution.
+    fn cancel_proposal(e: Env) -> Result<(), UpgradeError> {
+        authenticate_admin(&e);
         cancel_upgrade_proposal(&e)?;
         Ok(())
     }

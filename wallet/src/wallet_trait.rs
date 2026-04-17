@@ -1,50 +1,67 @@
 use soroban_sdk::{Address, BytesN, Env, Map, String, Symbol, Val, Vec};
 
-use socketfi_shared::{
-    types::{AccessSettings, WebKeyDetails},
-    ContractError,
-};
+use crate::{data::AccessSettings, errors::WalletError};
 
 pub trait WalletTrait {
+    // initialization
     fn __constructor(
         env: Env,
-        username: String,
         passkey: BytesN<77>,
         bls_keys: Vec<BytesN<96>>,
+        registry: Address,
+        fee_manager: Address,
+        social_router: Address,
         factory: Address,
-    ) -> Result<(), ContractError>;
+    ) -> Result<(), WalletError>;
+
+    // owner/account settings
+    fn set_external_wallet(
+        env: Env,
+        external_wallet: Address,
+        tx_signature: Option<BytesN<192>>,
+    ) -> Result<(), WalletError>;
 
     fn update_default_limit(
         env: Env,
         limit: i128,
         tx_signature: Option<BytesN<192>>,
-    ) -> Result<(), ContractError>;
+    ) -> Result<(), WalletError>;
 
-    fn set_external_wallet(
+    fn set_limit(
         env: Env,
-        external_wallet: Address,
+        asset: Address,
+        limit: i128,
         tx_signature: Option<BytesN<192>>,
-    ) -> Result<(), ContractError>;
-    fn reset_account(
-        env: Env,
-        bls_pubkeys: Vec<BytesN<96>>,
-        tx_signature: Option<BytesN<192>>,
-    ) -> Result<(), ContractError>;
-    fn update_factory(
-        env: Env,
-        factory: Address,
-        tx_signature: Option<BytesN<192>>,
-    ) -> Result<(), ContractError>;
+    ) -> Result<(), WalletError>;
 
-    fn deposit(e: Env, from: Address, token: Address, amount: i128) -> Result<(), ContractError>;
+    // asset actions
+    fn deposit(env: Env, from: Address, asset: Address, amount: i128) -> Result<(), WalletError>;
+
     fn withdraw(
         env: Env,
         to: Address,
-        token: Address,
+        asset: Address,
         amount: i128,
         tx_signature: Option<BytesN<192>>,
-    ) -> Result<(), ContractError>;
+    ) -> Result<(), WalletError>;
 
+    fn approve(
+        env: Env,
+        asset: Address,
+        spender: Address,
+        amount: i128,
+        tx_signature: Option<BytesN<192>>,
+    ) -> Result<(), WalletError>;
+
+    fn spend(
+        env: Env,
+        asset: Address,
+        spender: Address,
+        amount: i128,
+        to: Address,
+    ) -> Result<(), WalletError>;
+
+    // contract interaction
     fn dapp_invoker(
         env: Env,
         contract_id: Address,
@@ -52,43 +69,25 @@ pub trait WalletTrait {
         args: Option<Vec<Val>>,
         auth_vec: Option<Vec<Map<String, Val>>>,
         tx_signature: Option<BytesN<192>>,
-    ) -> Result<(), ContractError>;
+    ) -> Result<(), WalletError>;
 
-    ///Add token custom limit
-    fn add_limit(
-        env: Env,
-        token: Address,
-        limit: i128,
-        tx_signature: Option<BytesN<192>>,
-    ) -> Result<(), ContractError>;
-
-    fn approve(
-        env: Env,
-        token: Address,
-        spender: Address,
-        amount: i128,
-        tx_signature: Option<BytesN<192>>,
-    ) -> Result<(), ContractError>;
-    fn spend(
-        env: Env,
-        token: Address,
-        spender: Address,
-        amount: i128,
-        to: Address,
-    ) -> Result<(), ContractError>;
-
+    // views
     fn get_account_parameters(env: Env) -> AccessSettings;
-    fn get_passkey(env: Env) -> Result<WebKeyDetails, ContractError>;
-    fn get_allowance(env: Env, token: Address, spender: Address) -> i128;
-    fn get_nonce(env: Env) -> Option<BytesN<32>>;
+    fn get_passkey(env: Env) -> Option<BytesN<77>>;
+    fn get_allowance(env: Env, asset: Address, spender: Address) -> i128;
+    fn get_nonce(env: Env) -> u64;
+    fn get_tx_payload(env: Env, func: String, args: Vec<Val>) -> BytesN<32>;
+    fn get_balance(env: Env, asset: Address) -> i128;
+    fn get_owner(env: Env) -> Option<Address>;
+    fn get_registry(env: Env) -> Option<Address>;
+    fn get_fee_manager(env: Env) -> Option<Address>;
+    fn get_social_router(env: Env) -> Option<Address>;
+    fn get_factory(env: Env) -> Option<Address>;
 
-    fn get_tx_payload(env: Env, func: String, args: Vec<Val>) -> Result<BytesN<32>, ContractError>;
-    fn get_balance(env: Env, token: Address) -> i128;
-    fn get_owner(env: Env) -> Result<Address, ContractError>;
-    fn get_factory(env: Env) -> Result<Address, ContractError>;
+    // upgrade
     fn upgrade(
         env: Env,
         wasm: BytesN<32>,
         tx_signature: Option<BytesN<192>>,
-    ) -> Result<(), ContractError>;
+    ) -> Result<(), WalletError>;
 }
