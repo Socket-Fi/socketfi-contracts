@@ -1,45 +1,84 @@
-use socketfi_shared::utils::bump_instance;
-use socketfi_shared::{types::UpgradeType, ContractError};
+use crate::errors::UpgradeError;
+use crate::types::UpgradeType;
 use soroban_sdk::{contracttype, BytesN, Env, String};
 
 /// Storage keys used by the upgrade governance module.
 ///
-/// Design notes:
-/// - Only one proposal can be active at a time.
-/// - `FutureWASM` and `ProposalType` always belong to the same active proposal.
-/// - `VotedList` is global because only one proposal is allowed at a time.
-/// - `NewWalletVersion` stores the approved wallet implementation hash when the
-///   proposal type is `WalletVersion`.
+/// -----------------------------------------------------------------------------
+/// DESIGN OVERVIEW
+/// -----------------------------------------------------------------------------
+/// - Only ONE proposal can exist at any time.
+/// - Proposal state is stored in instance storage (global, contract-wide).
+/// - Voting data (`VotedList`) is stored in persistent storage.
+///
+/// CORE INVARIANTS:
+/// - `FutureWASM` and `ProposalType` MUST always be written together.
+/// - `UpgradeVotingDeadline != 0` implies an active proposal exists.
+/// - When a proposal is cleared, ALL related state must be removed.
+///
+/// IMPORTANT:
+/// - This module does NOT enforce authorization.
+/// - Callers must enforce admin/governance permissions.
+///
+/// STORAGE SPLIT:
+/// - Instance storage → proposal metadata (cheap, global)
+/// - Persistent storage → voter participation (per-address state)
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
     /// UNIX timestamp after which the pending proposal may be executed.
+    ///
+    /// NOTE:
+    /// - `0` means NO active proposal.
     UpgradeVotingDeadline,
 
-    /// WASM hash under vote.
+    /// WASM hash currently under vote.
+    ///
+    /// INVARIANT:
+    /// - Must always exist together with `ProposalType`.
     FutureWASM,
 
     /// Approved voter set.
+    ///
+    /// NOTE:
+    /// - Managed separately (add/remove voter functions).
     VotersList,
 
     /// Addresses that have voted for the current active proposal.
+    ///
+    /// DESIGN:
+    /// - Global because only one proposal exists at a time.
+    /// - Cleared entirely when proposal ends.
     VotedList,
 
     /// Latest approved wallet version hash.
+    ///
+    /// NOTE:
+    /// - Used when proposal type = WalletVersion.
+    /// - Survives across proposals.
     WalletVersion,
 
     /// Type of the currently active proposal.
+    ///
+    /// INVARIANT:
+    /// - Must always exist together with `FutureWASM`.
     ProposalType,
 }
 
+// -----------------------------------------------------------------------------
+// Voting Deadline
+// -----------------------------------------------------------------------------
+
 /// Returns the active voting deadline.
 ///
-/// Returns `0` when there is no active proposal.
+/// RETURNS:
+/// - `0` → no active proposal
+/// - `> 0` → active proposal exists
 ///
-/// Security note:
-/// - A deadline of `0` is treated as "no pending proposal".
+/// IMPORTANT:
+/// - This function is used as the PRIMARY signal for proposal existence.
+/// - Other state reads rely on this invariant being respected.
 pub fn get_upgrade_voting_deadline(e: &Env) -> u64 {
-    // bump_instance(e);
     e.storage()
         .instance()
         .get(&DataKey::UpgradeVotingDeadline)
@@ -47,56 +86,70 @@ pub fn get_upgrade_voting_deadline(e: &Env) -> u64 {
 }
 
 /// Writes the active voting deadline.
+///
+/// ASSUMPTION:
+/// - Caller ensures no existing active proposal.
+/// - Caller sets a valid future timestamp.
 pub fn write_upgrade_voting_deadline(e: &Env, value: &u64) {
-    // bump_instance(e);
     e.storage()
         .instance()
         .set(&DataKey::UpgradeVotingDeadline, value);
 }
 
-/// Returns the pending proposal payload as `(proposal_type, wasm_hash)`.
+// -----------------------------------------------------------------------------
+// Proposal State
+// -----------------------------------------------------------------------------
+
+/// Returns the pending proposal WASM hash.
 ///
-/// Errors:
-/// - `UpgradeWasmNotFound` if no pending WASM hash exists
-/// - `UpgradeTypeNotFound` if proposal type was not stored
+/// RETURNS:
+/// - `Some(hash)` → active proposal payload
+/// - `None` → no proposal or inconsistent state
 ///
-/// Invariant:
-/// - `FutureWASM` and `ProposalType` must always be set together.
-pub fn get_future_wasm(e: &Env) -> Result<(UpgradeType, BytesN<32>), ContractError> {
-    // bump_instance(e);
+/// NOTE:
+/// - Many higher-level functions use `.unwrap()` on this.
+/// - This relies on invariant:
+///     if deadline != 0 → FutureWASM MUST exist
+pub fn read_future_wasm(e: &Env) -> Option<BytesN<32>> {
+    e.storage().instance().get(&DataKey::FutureWASM)
+}
 
-    let wasm = e
-        .storage()
-        .instance()
-        .get(&DataKey::FutureWASM)
-        .ok_or(ContractError::UpgradeWasmNotFound)?;
-
-    let proposal_type = e
-        .storage()
-        .instance()
-        .get(&DataKey::ProposalType)
-        .ok_or(ContractError::UpgradeTypeNotFound)?;
-
-    Ok((proposal_type, wasm))
+/// Returns the proposal type.
+///
+/// RETURNS:
+/// - `Some(type)` → valid proposal
+/// - `None` → inconsistent or missing state
+///
+/// NOTE:
+/// - Must always exist alongside `FutureWASM`.
+pub fn read_proposal_type(e: &Env) -> Option<UpgradeType> {
+    e.storage().instance().get(&DataKey::ProposalType)
 }
 
 /// Stores a new pending proposal.
 ///
-/// `proposal_type` is provided as a string and converted into `UpgradeType`.
+/// FLOW:
+/// 1. Parse string → UpgradeType
+/// 2. Store WASM hash
+/// 3. Store proposal type
 ///
-/// Errors:
-/// - returns parsing/validation error if proposal type is unsupported
+/// ERRORS:
+/// - `UpgradeTypeNotFound` → invalid proposal type string
 ///
-/// Security note:
-/// - caller should enforce authorization before calling this helper.
+/// CRITICAL INVARIANT:
+/// - `FutureWASM` and `ProposalType` MUST be written together
+///
+/// SECURITY:
+/// - Caller must enforce:
+///     - authorization
+///     - no existing active proposal
 pub fn write_future_wasm(
     e: &Env,
     proposal_type: String,
     wasm: &BytesN<32>,
-) -> Result<(), ContractError> {
-    bump_instance(e);
-
-    let proposal_type = UpgradeType::upgrade_type(proposal_type)?;
+) -> Result<(), UpgradeError> {
+    let proposal_type =
+        UpgradeType::upgrade_type(proposal_type).ok_or(UpgradeError::UpgradeTypeNotFound)?;
 
     e.storage().instance().set(&DataKey::FutureWASM, wasm);
     e.storage()
@@ -106,45 +159,62 @@ pub fn write_future_wasm(
     Ok(())
 }
 
+// -----------------------------------------------------------------------------
+// Wallet Version
+// -----------------------------------------------------------------------------
+
 /// Stores the approved wallet implementation hash.
 ///
-/// Used only when a `WalletVersion` proposal passes.
-pub fn write_wallet_version(e: &Env, wasm_hash: &BytesN<32>) -> Result<(), ContractError> {
-    bump_instance(e);
+/// USED WHEN:
+/// - Proposal type = WalletVersion
+///
+/// NOTE:
+/// - This value persists across proposals.
+/// - It represents the "current approved wallet implementation".
+pub fn write_wallet_version(e: &Env, wasm_hash: &BytesN<32>) {
     e.storage()
         .instance()
         .set(&DataKey::WalletVersion, wasm_hash);
-    Ok(())
 }
+
 /// Returns the approved wallet implementation hash.
 ///
-/// Used for wallet creation and upgrades.
-pub fn read_wallet_version(e: &Env) -> Result<BytesN<32>, ContractError> {
-    let wasm = e
-        .storage()
-        .instance()
-        .get(&DataKey::WalletVersion)
-        .ok_or(ContractError::WalletWasmNotFound)?;
-    Ok(wasm)
+/// RETURNS:
+/// - `Some(hash)` → wallet version initialized
+/// - `None` → not initialized yet
+pub fn read_wallet_version(e: &Env) -> Option<BytesN<32>> {
+    e.storage().instance().get(&DataKey::WalletVersion)
 }
+
+// -----------------------------------------------------------------------------
+// Cleanup
+// -----------------------------------------------------------------------------
 
 /// Clears all state associated with the currently active proposal.
 ///
-/// This must be called:
+/// MUST BE CALLED:
 /// - after successful execution
-/// - after successful wallet version confirmation
-/// - on cancellation
+/// - after cancellation
+/// - after wallet version upgrade
 ///
-/// Security note:
-/// - because the design allows only one active proposal at a time, `VotedList`
-///   is cleared globally.
+/// EFFECT:
+/// - Removes proposal metadata (deadline, wasm, type)
+/// - Clears ALL votes
+///
+/// CRITICAL DESIGN:
+/// - Because only ONE proposal exists at a time,
+///   `VotedList` is global and fully reset.
+///
+/// SAFETY:
+/// - Safe to call even if some keys are missing
+/// - Leaves contract in "no active proposal" state
 pub fn clear_pending_upgrade_state(e: &Env) {
-    // bump_instance(e);
-
     e.storage()
         .instance()
         .remove(&DataKey::UpgradeVotingDeadline);
     e.storage().instance().remove(&DataKey::FutureWASM);
     e.storage().instance().remove(&DataKey::ProposalType);
+
+    // Persistent because votes are per-address state
     e.storage().persistent().remove(&DataKey::VotedList);
 }

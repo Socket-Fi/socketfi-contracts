@@ -1,91 +1,104 @@
-use socketfi_shared::ContractError;
 use soroban_sdk::{Address, BytesN, Env, String, Vec};
+use upgrade::errors::UpgradeError;
 
 /// Public interface for the factory contract.
 ///
-/// This trait defines the external contract surface for:
-/// - initialization
-/// - wallet creation
-/// - configuration reads and updates
-/// - upgrade governance actions
-///
-/// Audit note:
-/// - keep this trait aligned with the implementation order in `contract.rs`
-///   to improve readability and reduce maintenance mistakes
+/// Notes:
+/// - Covers wallet creation, admin config, and upgrade governance.
 pub trait FactoryTrait {
-    // ---------------------------------------------------------------------
-    // Initialization
-    // ---------------------------------------------------------------------
+    // initialization
 
-    /// Initializes the factory contract and core dependencies.
+    /// Initialize factory state and dependencies.
+    ///
+    /// Notes:
+    /// - Sets admin, dependencies, and wallet wasm version.
+    /// - Intended to run once.
     fn __constructor(
         e: Env,
         admin: Address,
         registry: Address,
+        social_router: Address,
         fee_manager: Address,
         wasm: BytesN<32>,
-    ) -> Result<(), ContractError>;
+    ) -> Result<(), UpgradeError>;
 
-    // ---------------------------------------------------------------------
-    // Wallet creation
-    // ---------------------------------------------------------------------
+    // wallet creation
 
-    /// Creates a new wallet instance.
+    /// Deploy a new wallet instance.
+    ///
+    /// Notes:
+    /// - Uses current wallet wasm version.
+    /// - Returns deployed wallet address.
     fn create_wallet(
         e: Env,
         passkey: BytesN<77>,
         bls_keys: Vec<BytesN<96>>,
-    ) -> Result<Address, ContractError>;
+    ) -> Result<Address, UpgradeError>;
 
-    // ---------------------------------------------------------------------
-    // Read-only getters
-    // ---------------------------------------------------------------------
+    // read-only getters
 
-    /// Returns the currently approved wallet version hash.
-    fn get_wallet_version(e: Env) -> Result<BytesN<32>, ContractError>;
+    /// Get current wallet wasm version.
+    fn get_wallet_version(e: Env) -> Option<BytesN<32>>;
 
-    /// Returns the current admin address.
-    fn get_admin(e: Env) -> Result<Address, ContractError>;
+    /// Get admin address.
+    fn get_admin(e: Env) -> Option<Address>;
 
-    /// Returns the configured registry contract address.
-    fn get_registry(e: Env) -> Result<Address, ContractError>;
+    /// Get registry address.
+    fn get_registry(e: Env) -> Option<Address>;
 
-    /// Returns the configured fee manager contract address.
-    fn get_fee_manager(e: Env) -> Result<Address, ContractError>;
+    /// Get fee manager address.
+    fn get_fee_manager(e: Env) -> Option<Address>;
 
-    // ---------------------------------------------------------------------
-    // Admin configuration updates
-    // ---------------------------------------------------------------------
+    // admin configuration updates
 
-    /// Updates the current admin address.
-    fn update_admin(e: Env, new_admin: Address) -> Result<(), ContractError>;
+    /// Update admin.
+    ///
+    /// Notes:
+    /// - Changes control over privileged actions.
+    fn update_admin(e: Env, new_admin: Address);
 
-    /// Updates the registry contract address.
-    fn update_registry(e: Env, registry: Address) -> Result<(), ContractError>;
+    /// Update registry dependency.
+    ///
+    /// Notes:
+    /// - Affects future wallet deployments.
+    fn update_registry(e: Env, registry: Address);
 
-    /// Updates the fee manager contract address.
-    fn update_fee_manager(e: Env, fee_manager: Address) -> Result<(), ContractError>;
+    /// Update fee manager dependency.
+    ///
+    /// Notes:
+    /// - Affects future wallet deployments.
+    fn update_fee_manager(e: Env, fee_manager: Address);
 
-    // ---------------------------------------------------------------------
-    // Upgrade governance
-    // ---------------------------------------------------------------------
+    // upgrade governance
 
-    /// Executes a passed upgrade proposal.
-    fn apply_upgrade(e: Env) -> Result<BytesN<32>, ContractError>;
+    /// Execute approved upgrade.
+    ///
+    /// Notes:
+    /// - Applies new version state.
+    fn apply_upgrade(e: Env) -> Result<BytesN<32>, UpgradeError>;
 
-    /// Creates a new upgrade proposal.
+    /// Create upgrade proposal.
+    ///
+    /// Notes:
+    /// - Starts governance flow for new version.
     fn propose_upgrade(
         e: Env,
         proposal_type: String,
         new_wasm_hash: BytesN<32>,
-    ) -> Result<(), ContractError>;
+    ) -> Result<(), UpgradeError>;
 
-    /// Adds a voter to the upgrade governance set.
-    fn add_voter(e: Env, voter: Address) -> Result<(), ContractError>;
+    /// Add governance voter.
+    fn add_voter(e: Env, voter: Address);
 
-    /// Casts a vote for an active upgrade proposal.
-    fn cast_vote(e: Env, voter: Address, wasm_hash: BytesN<32>) -> Result<(), ContractError>;
+    /// Remove governance voter.
+    fn remove_voter(e: Env, voter: Address);
 
-    /// Cancels the current active proposal.
-    fn cancel_proposal(e: Env) -> Result<(), ContractError>;
+    /// Cast vote on proposal.
+    ///
+    /// Notes:
+    /// - Records voter approval.
+    fn cast_vote(e: Env, voter: Address, wasm_hash: BytesN<32>) -> Result<(), UpgradeError>;
+
+    /// Cancel active proposal.
+    fn cancel_proposal(e: Env) -> Result<(), UpgradeError>;
 }

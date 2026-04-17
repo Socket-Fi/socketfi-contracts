@@ -1,242 +1,148 @@
 # Factory Contract
 
-The **Factory Contract** is the core entry point for wallet creation and upgrade governance within the SocketFi ecosystem.
+The **Factory Contract** is the deployment and governance entry point for wallet creation in the SocketFi ecosystem.
 
-It is responsible for:
-
-- Creating new wallet instances
-- Managing core system contract dependencies
-- Handling upgrade governance (proposals, voting, execution)
+It manages wallet deployment, system dependencies, and upgrade coordination.
 
 ---
 
-## ✨ Features
+## Overview
 
-### 🔐 Wallet Creation
+The Factory contract is responsible for:
 
-- Permissionless wallet deployment
-- Supports passkey-based identity and BLS key attachments
-- Emits wallet creation events
-
-### ⚙️ System Configuration
-
-- Stores and manages:
-  - Admin address
-  - Registry contract
-  - Fee manager contract
-
-### 🗳️ Upgrade Governance
-
-- Proposal-based upgrade system
-- Multi-voter approval mechanism
-- Admin-triggered execution after approval
+- Deploying new wallet instances
+- Storing shared protocol dependencies
+- Managing the active wallet WASM version
+- Coordinating upgrade governance
 
 ---
 
-## 🧱 Contract Overview
+## Features
 
-- **Contract Name:** `FactoryContract`
-- **Trait:** `FactoryTrait`
-- **Language:** Rust (Soroban SDK)
+### Wallet Deployment
 
-Source: :contentReference[oaicite:0]{index=0}
+- Permissionless wallet creation
+- Initializes wallets with passkey and optional BLS keys
+- Uses the currently approved wallet WASM
+
+### System Configuration
+
+Stores core dependencies:
+
+- Admin
+- Registry contract
+- Fee manager contract
+- (Optional) Social router
+
+### Upgrade Governance
+
+- Proposal-based wallet upgrades
+- Approved voter participation
+- Controlled upgrade execution
 
 ---
 
-## 🚀 Initialization
+## Initialization
 
 ### `__constructor`
 
-Initializes the factory contract.
+Initializes the contract.
 
-#### Parameters:
+**Parameters:**
 
-- `admin: Address` — contract administrator
-- `registry: Address` — identity/registry contract
-- `fee_manager: Address` — fee management contract
-- `wasm: BytesN<32>` — initial wallet WASM hash
+- `admin: Address`
+- `registry: Address`
+- `fee_manager: Address`
+- `wasm: BytesN<32>`
 
-#### Behavior:
+(Optional if implemented)
+
+- `social_router: Address`
+
+**Notes:**
 
 - Can only be called once
-- Sets core configuration
-- Initializes wallet version
-- Adds admin as initial governance voter
+- Sets initial wallet version and dependencies
 
 ---
 
-## 🪪 Wallet Creation
+## Core Functions
 
 ### `create_wallet`
 
-Creates a new wallet instance.
+Deploys a new wallet instance.
 
-#### Parameters:
+**Params:**
 
-- `passkey: BytesN<77>` — wallet identity/passkey
-- `bls_keys: Vec<BytesN<96>>` — optional BLS public keys
+- `passkey: BytesN<77>`
+- `bls_keys: Vec<BytesN<96>>`
 
-#### Returns:
+**Returns:**
 
-- `Address` — newly created wallet address
-
-#### Notes:
-
-- Wallet creation is permissionless at this level
-- Additional validation may exist in downstream logic
+- `Address`
 
 ---
 
-## 📖 Read Methods
+### Read Methods
 
-### `get_wallet_version`
-
-Returns the current approved wallet WASM hash.
-
-### `get_admin`
-
-Returns the current admin address.
-
-### `get_registry`
-
-Returns the registry contract address.
-
-### `get_fee_manager`
-
-Returns the fee manager contract address.
+- `get_wallet_version`
+- `get_admin`
+- `get_registry`
+- `get_fee_manager`
+- `get_social_router` (if supported)
 
 ---
 
-## ⚙️ Admin Functions
+### Admin Functions
 
-All functions require **admin authorization**.
+Require admin authorization:
 
-### `update_admin(new_admin: Address)`
-
-Updates the admin address.
-
-### `update_registry(registry: Address)`
-
-Updates the registry contract.
-
-### `update_fee_manager(fee_manager: Address)`
-
-Updates the fee manager contract.
+- `update_admin`
+- `update_registry`
+- `update_fee_manager`
+- `update_social_router` (if supported)
 
 ---
 
-## 🗳️ Governance & Upgrades
+### Governance
 
-### `propose_upgrade`
-
-Creates a new upgrade proposal.
-
-#### Parameters:
-
-- `proposal_type: String`
-- `new_wasm_hash: BytesN<32>`
+- `propose_upgrade`
+- `add_voter`
+- `remove_voter`
+- `cast_vote`
+- `apply_upgrade`
+- `cancel_proposal`
 
 ---
 
-### `add_voter`
+## Security
 
-Adds a new governance voter.
-
-#### Parameters:
-
-- `voter: Address`
-
----
-
-### `cast_vote`
-
-Casts a vote on an active proposal.
-
-#### Parameters:
-
-- `voter: Address`
-- `wasm_hash: BytesN<32>`
+- Admin-gated configuration updates
+- Voter-controlled upgrade approval
+- One-time initialization
+- Wallet deployment is permissionless
 
 ---
 
-### `apply_upgrade`
+## Integration
 
-Executes a successful upgrade proposal.
+Used by:
 
-#### Returns:
-
-- `BytesN<32>` — applied WASM hash
-
----
-
-### `cancel_proposal`
-
-Cancels the active upgrade proposal.
+- Wallet contracts
+- Identity registry
+- Fee manager
+- Upgrade module
 
 ---
 
-## 🔐 Security Model
+## Notes
 
-- **Admin**
-
-  - Controls system configuration
-  - Manages governance lifecycle
-  - Executes upgrades
-
-- **Voters**
-
-  - Participate in upgrade voting
-  - Must be explicitly approved
-
-- **Users**
-  - Can create wallets permissionlessly
-
----
-
-## 📡 Events
-
-The contract emits events for key actions:
-
-- `WalletCreationEvent`
-- `UpdateAdminEvent`
-- `UpdateRegistryEvent`
-- `UpdateFeeManagerEvent`
-- `AddVoterEvent`
-
----
-
-## ⚠️ Notes & Considerations
-
-- Initialization is **one-time only**
-- Wallet creation is currently **permissionless**
-- `proposal_type` uses `String` (consider enum for stricter validation)
-- Ensure voter duplication is prevented in storage layer
-- Upgrade execution logic is enforced in the upgrade module
-
----
-
-## 🧪 Integration Notes
-
-- Designed to work with:
-  - Wallet contracts (WASM versions)
-  - Registry/identity contracts
-  - Fee manager contracts
-- Governance module handles voting logic and upgrade lifecycle
-
----
-
-## 📌 Summary
-
-The Factory Contract acts as the **control layer** of the system:
-
-- Deploys wallets
-- Manages dependencies
-- Coordinates upgrades securely through governance
+- Wallet version is controlled via governance
+- Prevent duplicate voters in storage
+- Prefer enum over string for proposal types
 
 ---
 
 ## License
 
-MIT License
-
----
+MIT

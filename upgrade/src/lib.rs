@@ -1,70 +1,74 @@
 #![no_std]
 
+pub mod errors;
 mod storage;
+mod types;
 pub mod voters;
 
+use crate::errors::UpgradeError;
 use crate::storage::{
-    clear_pending_upgrade_state, get_future_wasm, get_upgrade_voting_deadline, write_future_wasm,
-    write_upgrade_voting_deadline, write_wallet_version, DataKey,
+    clear_pending_upgrade_state, get_upgrade_voting_deadline, read_future_wasm, read_proposal_type,
+    read_wallet_version, write_future_wasm, write_upgrade_voting_deadline, write_wallet_version,
+    DataKey,
 };
-use crate::voters::{read_has_upgrade_passed, read_is_voter};
-use socketfi_shared::{
-    constants::UPGRADE_VOTING_DURATION, events, types::UpgradeType, ContractError,
-};
-use soroban_sdk::{Address, BytesN, Env, Map, String};
-use storage::read_wallet_version;
-use voters::write_add_voter;
+use crate::types::UpgradeType;
+use crate::voters::{read_has_upgrade_passed, read_is_voter, write_add_voter, write_remove_voter};
 
-/// Initializes the wallet version.
-///
-/// This function is intended to be called **once during contract deployment**
-/// (e.g. inside the wallet constructor or initialization function).
-///
-/// Behavior:
-/// - sets the initial wallet version hash
-/// - prevents re-initialization if already set
-///
-/// Requirements:
-/// - must not have been initialized before
-///
-/// Security notes:
-/// - this should only be callable during contract initialization
-///   (e.g. from `__constructor` or a protected init function)
-/// - re-initialization is blocked to prevent version hijacking
-///
-/// Design notes:
-/// - `wallet_version` typically represents the approved wallet WASM hash
-///   or a canonical version identifier used across upgrades
-/// - subsequent updates to the wallet version should go through the
-///   governance flow (`create_upgrade_proposal` + `execute_upgrade`)
-///
-/// Errors:
-/// - `AlreadyInitialized` if the wallet version has already been set
-pub fn init_wallet_version(e: &Env, wallet_version: &BytesN<32>) -> Result<(), ContractError> {
-    if e.storage().persistent().has(&DataKey::WalletVersion) {
-        return Err(ContractError::AlreadyInitialized);
+use socketfi_shared::{constants::UPGRADE_VOTING_DURATION, events};
+use soroban_sdk::{Address, BytesN, Env, Map, String};
+
+// -----------------------------------------------------------------------------
+// Wallet Version Initialization
+// -----------------------------------------------------------------------------
+// NOTE:
+// - Intended to be called once during initial contract setup.
+// - Prevents overwriting an already established wallet version hash.
+// - Uses persistent storage because wallet version must survive contract upgrades.
+//
+// SECURITY:
+// - This helper does not perform auth itself.
+// - It should only be called from a protected initialization path.
+//
+// ERROR:
+// - AlreadyInitialized -> if wallet version has already been set.
+pub fn init_wallet_version(e: &Env, wallet_version: &BytesN<32>) -> Result<(), UpgradeError> {
+    if e.storage()
+        .persistent()
+        .get::<_, BytesN<32>>(&DataKey::WalletVersion)
+        .is_some()
+    {
+        return Err(UpgradeError::AlreadyInitialized);
     }
 
-    write_wallet_version(e, wallet_version)?;
+    write_wallet_version(e, wallet_version);
     Ok(())
 }
 
-/// Creates a new upgrade proposal.
-///
-/// Flow:
-/// 1. ensure no other proposal is active
-/// 2. store voting deadline
-/// 3. store target WASM + proposal type
-///
-/// Security note:
-/// - caller should enforce proposer authorization before calling this helper.
+// -----------------------------------------------------------------------------
+// Upgrade Proposal Creation
+// -----------------------------------------------------------------------------
+// Creates a new pending upgrade proposal.
+//
+// FLOW:
+// 1. Ensures no other proposal is currently active.
+// 2. Computes and stores the voting deadline.
+// 3. Stores the proposed wasm hash + proposal type.
+// 4. Emits proposal event.
+//
+// NOTE:
+// - `proposal_type` determines execution behavior later.
+// - Voting window length is controlled by UPGRADE_VOTING_DURATION.
+//
+// SECURITY:
+// - This helper assumes caller already enforced proposer authorization.
+// - Only one active proposal can exist at a time.
 pub fn create_upgrade_proposal(
     e: &Env,
     proposal_type: String,
     wasm_hash: &BytesN<32>,
-) -> Result<(), ContractError> {
+) -> Result<(), UpgradeError> {
     if get_upgrade_voting_deadline(e) != 0 {
-        return Err(ContractError::AnotherUpgradePending);
+        return Err(UpgradeError::AnotherUpgradePending);
     }
 
     let deadline = e.ledger().timestamp() + UPGRADE_VOTING_DURATION;
@@ -80,44 +84,60 @@ pub fn create_upgrade_proposal(
     Ok(())
 }
 
-/// Casts a vote for the current active proposal.
-///
-/// Requirements:
-/// - there must be an active proposal
-/// - voting must still be open
-/// - `voter` must be in the approved voter list
-/// - `voter` must authorize the call
-/// - `wasm_hash` must match the active proposal
-/// - voter may only vote once
+// -----------------------------------------------------------------------------
+// Voting
+// -----------------------------------------------------------------------------
+// Casts a vote for the currently active proposal.
+//
+// REQUIREMENTS:
+// - A proposal must exist.
+// - Voting must still be open.
+// - Voter must be on the approved voter list.
+// - Voter may only vote once.
+// - Provided wasm hash must match the active proposal.
+//
+// NOTE:
+// - This function records the vote in persistent storage.
+// - Vote uniqueness is enforced through the VotedList map.
+//
+// IMPORTANT:
+// - `read_future_wasm(e).unwrap()` assumes proposal state is internally consistent
+//   once a non-zero voting deadline exists.
+// - If state corruption is possible elsewhere, that unwrap would become fragile.
+//
+// SECURITY:
+// - This helper checks voter eligibility.
+// - If caller also expects signature/auth, that should be enforced outside or
+//   before this helper is invoked.
 pub fn write_cast_vote(
     e: &Env,
     voter: &Address,
     wasm_hash: &BytesN<32>,
-) -> Result<(), ContractError> {
+) -> Result<(), UpgradeError> {
     let deadline = get_upgrade_voting_deadline(e);
 
     if deadline == 0 {
-        return Err(ContractError::NoPendingUpgradeAction);
+        return Err(UpgradeError::NoPendingUpgradeAction);
     }
 
     if e.ledger().timestamp() > deadline {
-        return Err(ContractError::VotingClosed);
+        return Err(UpgradeError::VotingClosed);
     }
 
     if !read_is_voter(e, voter.clone()) {
-        return Err(ContractError::NotInVotersList);
+        return Err(UpgradeError::NotInVotersList);
     }
 
-    let (_, future_wasm_hash) = get_future_wasm(e)?;
+    let future_wasm_hash = read_future_wasm(e).unwrap();
     if future_wasm_hash != *wasm_hash {
-        return Err(ContractError::InvalidUpgradeHash);
+        return Err(UpgradeError::InvalidUpgradeHash);
     }
 
     let key = DataKey::VotedList;
     let mut voted: Map<Address, ()> = e.storage().persistent().get(&key).unwrap_or(Map::new(e));
 
     if voted.contains_key(voter.clone()) {
-        return Err(ContractError::AlreadyVoted);
+        return Err(UpgradeError::AlreadyVoted);
     }
 
     voted.set(voter.clone(), ());
@@ -132,37 +152,48 @@ pub fn write_cast_vote(
     Ok(())
 }
 
-/// Finalizes the currently active proposal after voting ends.
-///
-/// Behavior depends on proposal type:
-/// - `Upgrade`      -> upgrades current contract WASM
-/// - `WalletVersion` -> records approved wallet version hash
-///
-/// Security notes:
-/// - execution is only allowed after deadline
-/// - proposal must have passed threshold
-/// - pending proposal state is cleared on success
-///
-/// Important:
-/// - for `Upgrade`, state is cleared before `update_current_contract_wasm`
-///   to avoid leaving stale proposal state behind.
-/// - for `WalletVersion`, the version write happens first because it may fail.
-pub fn execute_upgrade(e: &Env) -> Result<BytesN<32>, ContractError> {
+// -----------------------------------------------------------------------------
+// Proposal Execution
+// -----------------------------------------------------------------------------
+// Finalizes the active proposal after the voting deadline has passed.
+//
+// BEHAVIOR BY PROPOSAL TYPE:
+// - Upgrade:
+//     clears pending state, then upgrades current contract WASM.
+// - WalletVersion:
+//     writes approved wallet version hash, then clears pending state.
+//
+// REQUIREMENTS:
+// - Proposal must exist.
+// - Voting period must be over.
+// - Proposal must meet passing threshold.
+//
+// IMPORTANT ORDERING:
+// - For `Upgrade`, pending state is cleared before `update_current_contract_wasm`
+//   so stale proposal state is not left behind if the WASM update succeeds.
+// - For `WalletVersion`, the version write happens before clearing proposal
+//   state because the write may fail and should not silently discard proposal state.
+//
+// NOTE:
+// - `read_future_wasm(...).unwrap()` and `read_proposal_type(...).unwrap()` assume
+//   proposal state is valid whenever a deadline is present.
+pub fn execute_upgrade(e: &Env) -> Result<BytesN<32>, UpgradeError> {
     let deadline = get_upgrade_voting_deadline(e);
 
     if deadline == 0 {
-        return Err(ContractError::NoPendingUpgradeAction);
+        return Err(UpgradeError::NoPendingUpgradeAction);
     }
 
     if e.ledger().timestamp() < deadline {
-        return Err(ContractError::VotingStillOngoing);
+        return Err(UpgradeError::VotingStillOngoing);
     }
 
-    let (proposal_type, new_wasm_hash) = get_future_wasm(e)?;
+    let new_wasm_hash = read_future_wasm(e).unwrap();
+    let proposal_type: UpgradeType = read_proposal_type(e).unwrap();
     let (_, has_passed) = read_has_upgrade_passed(e)?;
 
     if !has_passed {
-        return Err(ContractError::DidNotPass);
+        return Err(UpgradeError::DidNotPass);
     }
 
     match proposal_type {
@@ -170,14 +201,16 @@ pub fn execute_upgrade(e: &Env) -> Result<BytesN<32>, ContractError> {
             clear_pending_upgrade_state(e);
             e.deployer()
                 .update_current_contract_wasm(new_wasm_hash.clone());
+
             events::ContractUpgradeEvent {
                 wasm: new_wasm_hash.clone(),
             }
             .publish(&e);
         }
         UpgradeType::WalletVersion => {
-            write_wallet_version(e, &new_wasm_hash)?;
+            write_wallet_version(e, &new_wasm_hash);
             clear_pending_upgrade_state(e);
+
             events::WalletVersionUpgradeEvent {
                 wasm: new_wasm_hash.clone(),
             }
@@ -188,27 +221,66 @@ pub fn execute_upgrade(e: &Env) -> Result<BytesN<32>, ContractError> {
     Ok(new_wasm_hash)
 }
 
-/// Cancels the currently active proposal and clears all pending proposal state.
-///
-/// Security note:
-/// - caller should enforce authorization before calling this helper.
-pub fn cancel_upgrade_proposal(e: &Env) -> Result<(), ContractError> {
-    let (_, wasm) = get_future_wasm(e)?;
+// -----------------------------------------------------------------------------
+// Proposal Cancellation
+// -----------------------------------------------------------------------------
+// Cancels the active proposal and clears all pending proposal state.
+//
+// NOTE:
+// - Intended for authorized administrative/governance cancellation flow.
+// - Emits cancellation event using the currently pending wasm hash.
+//
+// IMPORTANT:
+// - `read_future_wasm(e).unwrap()` assumes a valid pending proposal exists when
+//   this helper is called.
+// - This function does not itself verify that a proposal exists before unwrap.
+//
+// SECURITY:
+// - Caller should enforce authorization before invoking this helper.
+pub fn cancel_upgrade_proposal(e: &Env) -> Result<(), UpgradeError> {
+    let wasm = read_future_wasm(e).unwrap();
     clear_pending_upgrade_state(e);
+
     events::UpgradeCancelledEvent { wasm: wasm.clone() }.publish(&e);
     Ok(())
 }
 
-/// Returns `(vote_count, has_passed)` for the current active proposal.
-pub fn get_upgrade_votes(e: &Env) -> Result<(u32, bool), ContractError> {
+// -----------------------------------------------------------------------------
+// Read Helpers
+// -----------------------------------------------------------------------------
+// Returns `(vote_count, has_passed)` for the current active proposal.
+//
+// NOTE:
+// - Delegates threshold logic to voters module.
+pub fn get_upgrade_votes(e: &Env) -> Result<(u32, bool), UpgradeError> {
     read_has_upgrade_passed(e)
 }
-/// Returns `(vote_count, has_passed)` for the current active proposal.
-pub fn get_wallet_version(e: &Env) -> Result<BytesN<32>, ContractError> {
+
+// Returns the currently approved wallet version hash, if set.
+//
+// NOTE:
+// - Returns None if wallet version has not been initialized yet.
+pub fn get_wallet_version(e: &Env) -> Option<BytesN<32>> {
     read_wallet_version(e)
 }
-/// Add new Voter `(vote_count, has_passed)` for the current active proposal.
-pub fn upgrade_add_voter(e: &Env, voter: &Address) -> Result<(), ContractError> {
-    write_add_voter(e, voter)?;
-    Ok(())
+
+// -----------------------------------------------------------------------------
+// Voter Management
+// -----------------------------------------------------------------------------
+// Adds a new voter to the approved voter set.
+//
+// NOTE:
+// - This helper does not enforce authorization by itself.
+// - Intended to be called only from protected admin/governance entrypoints.
+pub fn upgrade_add_voter(e: &Env, voter: &Address) {
+    write_add_voter(e, voter);
+}
+
+// Removes a voter from the approved voter set.
+//
+// NOTE:
+// - This helper does not enforce authorization by itself.
+// - Intended to be called only from protected admin/governance entrypoints.
+pub fn upgrade_remove_voter(e: &Env, voter: &Address) {
+    write_remove_voter(e, voter);
 }

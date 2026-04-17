@@ -1,69 +1,136 @@
 use soroban_sdk::{contracttype, token, Address, Env, Map, Vec};
 
-use crate::ContractError;
+/// Shared storage keys for token utilities and asset configuration.
+///
+/// NOTE:
+/// - `AllowanceExpiration` is stored as a ledger offset, not an absolute ledger.
+/// - Spend limits are stored in instance storage because they are contract-wide config.
+/// - Supported assets are stored in persistent storage as a set-like `Map<Address, ()>`.
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
+    /// Relative ledger offset used when creating token approvals.
     AllowanceExpiration,
-    DefaultSpendLimit,
-    SpendLimit(Address),
-SupportedAssets
 
+    /// Default spend limit used when an asset-specific limit is not set.
+    DefaultSpendLimit,
+
+    /// Per-asset spend limit override.
+    SpendLimit(Address),
+
+    /// Set of assets supported by the caller contract.
+    SupportedAssets,
 }
 
+// -----------------------------------------------------------------------------
+// Token Transfers
+// -----------------------------------------------------------------------------
+
+/// Transfers `amount` of `asset` from `from` into the current contract.
+///
+/// REQUIREMENTS:
+/// - `from` must authorize the transfer according to token contract rules.
+/// - `amount` should be valid and non-negative according to caller logic.
+///
+/// NOTE:
+/// - This helper does not validate amount or auth itself.
+/// - The receiving address is always `env.current_contract_address()`.
 pub fn take_asset(env: &Env, from: &Address, asset: &Address, amount: i128) {
     let client = token::Client::new(env, asset);
     let to = env.current_contract_address();
     client.transfer(from, &to, &amount);
 }
 
+/// Transfers `amount` of `asset` from the current contract to `to`.
+///
+/// REQUIREMENTS:
+/// - The current contract must hold sufficient balance.
+/// - `amount` should be valid and non-negative according to caller logic.
 pub fn send_asset(env: &Env, to: &Address, asset: &Address, amount: i128) {
     let client = token::Client::new(env, asset);
     let from = env.current_contract_address();
     client.transfer(&from, to, &amount);
 }
 
+/// Spends tokens via allowance using `transfer_from`.
+///
+/// FLOW:
+/// - `spender` is treated as the owner/source account.
+/// - The current contract acts as the spender.
+/// - Tokens are transferred from `spender` to `to`.
+///
+/// IMPORTANT:
+/// - This requires prior approval for the current contract to spend from `spender`.
+/// - Function name may read like "spender is the spender role", but in token terms
+///   it is actually the token owner/source account passed as `from`.
 pub fn spend_asset(env: &Env, spender: &Address, asset: &Address, amount: i128, to: &Address) {
     let client = token::Client::new(env, asset);
     let from = env.current_contract_address();
     client.transfer_from(&spender, &from, to, &amount);
 }
 
+// -----------------------------------------------------------------------------
+// Token Reads
+// -----------------------------------------------------------------------------
+
+/// Returns the current contract's balance for `asset`.
 pub fn read_balance(env: &Env, asset: &Address) -> i128 {
     let client = token::Client::new(env, asset);
     let of = env.current_contract_address();
     client.balance(&of)
 }
 
-pub fn read_allowance(env: &Env, asset:  &Address, spender: &Address) -> i128 {
+/// Returns the allowance granted by the current contract to `spender`.
+///
+/// NOTE:
+/// - Reads allowance where:
+///   - owner = current contract
+///   - spender = provided address
+pub fn read_allowance(env: &Env, asset: &Address, spender: &Address) -> i128 {
     let client = token::Client::new(env, asset);
     let from = env.current_contract_address();
     client.allowance(&from, spender)
 }
 
-pub fn write_approve(
-    env: &Env,
-    asset: &Address,
-    spender: &Address,
-    amount: &i128,
-) -> Result<(), ContractError> {
+// -----------------------------------------------------------------------------
+// Token Approval Configuration
+// -----------------------------------------------------------------------------
+
+/// Approves `spender` to spend `amount` from the current contract.
+///
+/// EXPIRATION:
+/// - Approval expiration is computed as:
+///   `current_ledger_sequence + stored_allowance_offset`
+///
+/// IMPORTANT:
+/// - `AllowanceExpiration` stores a relative offset, not an absolute sequence.
+/// - Overflow will panic with `expect("invalid allowance expiration")`.
+/// - Caller is responsible for deciding safe allowance amounts.
+pub fn write_approve(env: &Env, asset: &Address, spender: &Address, amount: &i128) {
     let client = token::Client::new(env, asset);
     let from = env.current_contract_address();
 
     let expiration = read_allowance_expiration(env)
         .checked_add(env.ledger().sequence())
-        .ok_or(ContractError::InvalidExpiration)?;
+        .expect("invalid allowance expiration");
 
     client.approve(&from, spender, amount, &expiration);
-    Ok(())
 }
 
+/// Stores the allowance expiration offset in ledgers.
+///
+/// NOTE:
+/// - This is a relative offset from the current ledger sequence at approval time.
 pub fn write_allowance_expiration(env: &Env, ledger_offset: u32) {
     env.storage()
         .persistent()
         .set(&DataKey::AllowanceExpiration, &ledger_offset);
 }
 
+/// Returns the configured allowance expiration offset.
+///
+/// DEFAULT:
+/// - `17_000` ledgers if not explicitly configured.
 pub fn read_allowance_expiration(env: &Env) -> u32 {
     env.storage()
         .persistent()
@@ -71,12 +138,24 @@ pub fn read_allowance_expiration(env: &Env) -> u32 {
         .unwrap_or(17_000)
 }
 
+// -----------------------------------------------------------------------------
+// Spend Limits
+// -----------------------------------------------------------------------------
+
+/// Stores the default spend limit.
+///
+/// NOTE:
+/// - Used as fallback for assets without a specific override.
 pub fn write_default_spend_limit(env: &Env, limit: i128) {
     env.storage()
         .instance()
         .set(&DataKey::DefaultSpendLimit, &limit);
 }
 
+/// Returns the default spend limit.
+///
+/// DEFAULT:
+/// - `0` if not set.
 pub fn read_default_spend_limit(env: &Env) -> i128 {
     env.storage()
         .instance()
@@ -84,6 +163,14 @@ pub fn read_default_spend_limit(env: &Env) -> i128 {
         .unwrap_or(0)
 }
 
+/// Returns the spend limit for a specific asset.
+///
+/// BEHAVIOR:
+/// - Uses the asset-specific limit if present.
+/// - Otherwise falls back to `DefaultSpendLimit`.
+///
+/// NOTE:
+/// - A missing default also falls back to `0`.
 pub fn read_limit(env: &Env, asset: Address) -> i128 {
     env.storage()
         .instance()
@@ -91,20 +178,22 @@ pub fn read_limit(env: &Env, asset: Address) -> i128 {
         .unwrap_or(read_default_spend_limit(&env))
 }
 
+/// Stores the spend limit for a specific asset.
 pub fn write_limit(env: &Env, asset: Address, limit: i128) {
     env.storage()
         .instance()
         .set(&DataKey::SpendLimit(asset), &limit);
 }
 
+// -----------------------------------------------------------------------------
+// Supported Assets Set
+// -----------------------------------------------------------------------------
 
-
-
-/// Returns true if asset is supported for fee payment.
+/// Returns true if `asset` is in the supported assets set.
 ///
-/// Audit notes:
-/// - Defaults to false if storage key does not exist.
-/// - Uses Map<Address, ()> as a set representation.
+/// NOTE:
+/// - Defaults to `false` if the storage key does not exist.
+/// - Uses `Map<Address, ()>` as a set representation.
 pub fn read_is_supported_asset(e: &Env, asset: Address) -> bool {
     e.storage()
         .persistent()
@@ -113,7 +202,11 @@ pub fn read_is_supported_asset(e: &Env, asset: Address) -> bool {
         .unwrap_or(false)
 }
 
-
+/// Returns all supported assets.
+///
+/// NOTE:
+/// - Returns an empty vector if the set has not been initialized.
+/// - Ordering depends on map key ordering and should not be relied on.
 pub fn read_supported_assets(e: &Env) -> Vec<Address> {
     let m = e
         .storage()
@@ -124,51 +217,50 @@ pub fn read_supported_assets(e: &Env) -> Vec<Address> {
     m.keys()
 }
 
-/// Adds a asset to the supported fee assets set.
+/// Adds an asset to the supported assets set.
 ///
-/// Returns:
-/// - Ok(()) if successfully added
-/// - Err(ContractError::assetAlreadySupported) if already exists
+/// BEHAVIOR:
+/// - If the asset already exists, this function does nothing.
+/// - Otherwise, it inserts the asset into the set.
 ///
-/// Audit notes:
-/// - Uses Map<Address, ()> as a set
-/// - Must be protected by admin auth at higher level
-pub fn write_is_supported_asset(
-    e: &Env,
-    asset: Address,
-) -> Result<(), ContractError> {
-    let mut m = e
+/// IMPORTANT:
+/// - This function does NOT return an error on duplicates.
+/// - Authorization must be enforced by the caller.
+pub fn write_add_asset(e: &Env, asset: Address) {
+    let mut m: Map<Address, ()> = e
         .storage()
         .persistent()
-        .get::<_, Map<Address, ()>>(&DataKey::SupportedAssets)
+        .get(&DataKey::SupportedAssets)
         .unwrap_or_else(|| Map::new(e));
 
     if m.contains_key(asset.clone()) {
-        return Err(ContractError::AssetAlreadySupported);
+        return;
     }
 
     m.set(asset, ());
     e.storage().persistent().set(&DataKey::SupportedAssets, &m);
-
-    Ok(())
 }
 
-
-pub fn write_not_supported_asset(
-    e: &Env,
-    asset: Address,
-) -> Result<(), ContractError> {
+/// Removes an asset from the supported assets set.
+///
+/// BEHAVIOR:
+/// - If the asset does not exist, this function does nothing.
+/// - Otherwise, it removes the asset from the set.
+///
+/// IMPORTANT:
+/// - This function does NOT return an error if the asset is absent.
+/// - Authorization must be enforced by the caller.
+pub fn write_remove_asset(e: &Env, asset: Address) {
     let mut m = e
         .storage()
         .persistent()
         .get::<_, Map<Address, ()>>(&DataKey::SupportedAssets)
         .unwrap_or_else(|| Map::new(e));
 
-    if m.remove(asset).is_none() {
-        return Err(ContractError::AssetNotSupported);
+    if !m.contains_key(asset.clone()) {
+        return;
     }
 
+    m.remove(asset);
     e.storage().persistent().set(&DataKey::SupportedAssets, &m);
-
-    Ok(())
 }
