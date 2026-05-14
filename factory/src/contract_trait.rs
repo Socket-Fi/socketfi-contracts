@@ -1,6 +1,8 @@
 use soroban_sdk::{Address, BytesN, Env, String, Vec};
 use upgrade::errors::UpgradeError;
 
+use crate::{data::BlsKeyWithProof, errors::FactoryError};
+
 /// Public interface for the factory contract.
 ///
 /// Notes:
@@ -32,13 +34,20 @@ pub trait FactoryTrait {
     fn create_wallet(
         e: Env,
         passkey: BytesN<77>,
-        bls_keys: Vec<BytesN<96>>,
-    ) -> Result<Address, UpgradeError>;
+        bls_keys_pop: Vec<BlsKeyWithProof>,
+    ) -> Result<Address, FactoryError>;
 
     // read-only getters
 
     /// Get current wallet wasm version.
     fn get_wallet_version(e: Env) -> Option<BytesN<32>>;
+
+    ///Canonical proof-of-possession challenge salt
+    fn get_pop_salt(
+        e: Env,
+        passkey: BytesN<77>,
+        bls_keys: Vec<BytesN<96>>,
+    ) -> Result<BytesN<32>, FactoryError>;
 
     /// Get admin address.
     fn get_admin(e: Env) -> Option<Address>;

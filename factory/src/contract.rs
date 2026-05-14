@@ -1,4 +1,9 @@
-use crate::{contract_trait::FactoryTrait, wallet_factory::write_create_wallet};
+use crate::{
+    contract_trait::FactoryTrait,
+    data::BlsKeyWithProof,
+    errors::FactoryError,
+    wallet_factory::{extract_bls_keys, read_pop_salt, write_create_wallet},
+};
 use socketfi_access::access::{
     authenticate_admin, has_admin, read_admin, read_fee_manager, read_registry, write_admin,
     write_fee_manager, write_registry, write_social_router,
@@ -74,14 +79,14 @@ impl FactoryTrait for FactoryContract {
     fn create_wallet(
         e: Env,
         passkey: BytesN<77>,
-        bls_keys: Vec<BytesN<96>>,
-    ) -> Result<Address, UpgradeError> {
-        let wallet_address = write_create_wallet(&e, &passkey, bls_keys.clone())?;
+        bls_keys_pop: Vec<BlsKeyWithProof>,
+    ) -> Result<Address, FactoryError> {
+        let wallet_address = write_create_wallet(&e, &passkey, bls_keys_pop.clone())?;
 
         events::WalletCreationEvent {
             wallet: wallet_address.clone(),
             passkey,
-            bls_keys,
+            bls_keys: extract_bls_keys(&e, bls_keys_pop),
         }
         .publish(&e);
 
@@ -96,6 +101,18 @@ impl FactoryTrait for FactoryContract {
     /// - Read-only helper used to inspect deployment version state.
     fn get_wallet_version(e: Env) -> Option<BytesN<32>> {
         read_wallet_version(&e)
+    }
+
+    // Returns the canonical proof-of-possession challenge salt used during
+    // wallet creation. The salt is derived from the passkey and the canonical
+    // aggregate BLS public key, ensuring all signer nodes compute and sign the
+    // exact same deterministic challenge off-chain.
+    fn get_pop_salt(
+        e: Env,
+        passkey: BytesN<77>,
+        bls_keys: Vec<BytesN<96>>,
+    ) -> Result<BytesN<32>, FactoryError> {
+        read_pop_salt(&e, &passkey, bls_keys)
     }
 
     /// Return the current admin address.

@@ -1,4 +1,6 @@
 #![no_std]
 mod contract;
 mod contract_trait;
+mod data;
+mod errors;
 mod wallet_factory;
