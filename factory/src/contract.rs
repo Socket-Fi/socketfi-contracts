@@ -76,10 +76,12 @@ impl FactoryTrait for FactoryContract {
         passkey: BytesN<77>,
         bls_keys: Vec<BytesN<96>>,
     ) -> Result<Address, UpgradeError> {
-        let wallet_address = write_create_wallet(&e, &passkey, bls_keys)?;
+        let wallet_address = write_create_wallet(&e, &passkey, bls_keys.clone())?;
 
         events::WalletCreationEvent {
             wallet: wallet_address.clone(),
+            passkey,
+            bls_keys,
         }
         .publish(&e);
 
@@ -157,8 +159,6 @@ impl FactoryTrait for FactoryContract {
         }
         .publish(&e);
     }
-
-
 
     /// Update the social router dependency used by the factory.
     ///

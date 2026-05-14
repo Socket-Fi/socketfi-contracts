@@ -1,4 +1,4 @@
-use soroban_sdk::{contractevent, Address, BytesN};
+use soroban_sdk::{contractevent, Address, BytesN, Vec};
 
 #[contractevent(topics = ["Upgrade", "ProposalCreated"])]
 pub struct UpgradeProposalEvent {
@@ -29,6 +29,8 @@ pub struct UpgradeCancelledEvent {
 #[contractevent(topics = ["Wallet", "Creation"])]
 pub struct WalletCreationEvent {
     pub wallet: Address,
+    pub passkey: BytesN<77>,
+   pub bls_keys: Vec<BytesN<96>>,
 }
 #[contractevent(topics = ["Update", "Admin"])]
 pub struct UpdateAdminEvent {
