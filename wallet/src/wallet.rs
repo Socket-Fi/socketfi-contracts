@@ -43,8 +43,8 @@ impl WalletTrait for Wallet {
         passkey: BytesN<77>,
         bls_keys: Vec<BytesN<96>>,
         registry: Address,
-        fee_manager: Address,
         social_router: Address,
+        fee_manager: Address,
         factory: Address,
     ) -> Result<(), WalletError> {
         if is_initialized(&env) {
@@ -348,20 +348,24 @@ impl WalletTrait for Wallet {
         auth_vec: Option<Vec<Map<String, Val>>>,
         tx_signature: Option<BytesN<192>>,
     ) -> Result<(), WalletError> {
-        let a_args: Vec<Val> = vec![
+        let mut a_args: Vec<Val> = vec![
             &env,
             contract_id.clone().into_val(&env),
             func.clone().into_val(&env),
-            args.clone().into_val(&env),
-            auth_vec.clone().into_val(&env),
         ];
+
+        if let Some(a) = args.clone() {
+            a_args.push_back(a.into_val(&env))
+        }
+
+        if let Some(p) = auth_vec {
+            a_args.push_back(p.into_val(&env));
+            dapp_invoke_auth(&env, p)?;
+        }
+
         let payload = compute_tx_nonce(&env, String::from_str(&env, "dapp_invoker"), a_args);
 
         owner_require_auth(env.clone(), payload, tx_signature)?;
-
-        if let Some(p) = auth_vec {
-            dapp_invoke_auth(&env, p)?;
-        }
 
         let _res: Val = env.invoke_contract(&contract_id, &func, args.unwrap_or(vec![&env]));
         Ok(())

@@ -205,7 +205,7 @@ impl FeeManagerTrait for FeeManager {
             }
         }
 
-        // IMPORTANT: keep real business rule
+      
         if total_fee_base > max_deferred_fee {
             return FeeDecision::Defer(DeferData {
                 updated_deferred_fee: deferred_fee,

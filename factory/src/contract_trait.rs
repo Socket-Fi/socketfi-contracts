@@ -62,6 +62,12 @@ pub trait FactoryTrait {
     /// Notes:
     /// - Affects future wallet deployments.
     fn update_registry(e: Env, registry: Address);
+    
+    /// Update social router dependency.
+    ///
+    /// Notes:
+    /// - Affects future wallet deployments.
+    fn update_social_router(e: Env, social_router: Address) ;
 
     /// Update fee manager dependency.
     ///

@@ -158,6 +158,26 @@ impl FactoryTrait for FactoryContract {
         .publish(&e);
     }
 
+
+
+    /// Update the social router dependency used by the factory.
+    ///
+    /// Auth:
+    /// - Admin only.
+    ///
+    /// Effects:
+    /// - Replaces the social router address used for future wallet deployments.
+    /// - Emits a social router update event.
+    fn update_social_router(e: Env, social_router: Address) {
+        authenticate_admin(&e);
+        write_social_router(&e, &social_router);
+
+        events::UpdateSocialRouterEvent {
+            value: social_router.clone(),
+        }
+        .publish(&e);
+    }
+
     /// Update the fee manager dependency used by the factory.
     ///
     /// Auth:
