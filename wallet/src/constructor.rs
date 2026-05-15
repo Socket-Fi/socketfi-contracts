@@ -21,8 +21,8 @@ pub fn init_constructor(
     passkey: BytesN<77>,
     bls_keys: Vec<BytesN<96>>,
     registry: Address,
-    fee_manager: Address,
     social_router: Address,
+    fee_manager: Address,
     factory: Address,
 ) -> Result<(), WalletError> {
     // Store the passkey payload used by the wallet auth model.

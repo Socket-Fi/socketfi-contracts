@@ -134,7 +134,7 @@ pub fn write_create_wallet(
             bls_keys.clone(),
             read_registry(e).unwrap(),
             read_social_router(e).unwrap(),
-            read_fee_manager(e),
+            read_fee_manager(e).unwrap(),
             e.current_contract_address(),
         ),
     );
